@@ -1,0 +1,265 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "util-random.glsl"
+
+// test-only shims: ponder's util-random.glsl draws from pcg32 u64 states,
+// but the openpbr material shaders (ported from cull) still draw from f32
+// and f32v2 seeds. cull's overloads are replicated here so the lib files
+// compile unmodified; see the latent incompatibility note in the eon suite
+f32 fnSampleUniform(inout f32 seed) {
+	u32 s = fnPcgHash(floatBitsToUint(seed));
+	seed = uintBitsToFloat((s >> 9u) | 0x3F800000u) - 1.0f;
+	return seed;
+}
+
+f32v2 fnSampleUniform2(inout f32v2 seed) {
+	u32 s = fnPcgHash(floatBitsToUint(seed.x) ^ floatBitsToUint(seed.y));
+	u32 s2 = fnPcgHash(s);
+	seed.x = uintBitsToFloat((s >> 9u) | 0x3F800000u) - 1.0f;
+	seed.y = uintBitsToFloat((s2 >> 9u) | 0x3F800000u) - 1.0f;
+	return seed;
+}
+
+// first consumer of the FULL ported material chain: lobe selection,
+// sampling, pdf and evaluation all go through the public openPbr* api
+#include "util-material-openpbr.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+layout(buffer_reference, scalar) buffer F32v3Buffer {
+	f32v3 data[];
+};
+layout(buffer_reference, scalar) buffer U32Buffer {
+	u32 data[];
+};
+
+// per-instance geometry + material record, uploaded by the test. layout
+// must match InstanceRecord in test-cornell.cpp (scalar packing)
+struct InstanceRecord {
+	uint64_t vertexVa;
+	uint64_t indexVa;
+	f32v3 baseColor;
+	f32 baseWeight;
+	f32 baseMetalness;
+	f32 baseDiffuseRoughness;
+	f32 specularWeight;
+	f32 specularRoughness;
+	f32v3 specularColor;
+	f32 specularRoughnessAnisotropy;
+	f32v3 emission;
+	f32 specularIor;
+};
+layout(buffer_reference, scalar) buffer InstanceRecordBuffer {
+	InstanceRecord data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint64_t sceneVa;
+	uint width;
+	uint height;
+	uint sampleCount;
+	uint kullaContyHandle;
+} pc;
+
+const vec3 skCameraOrigin = vec3(0.0, 0.0, -3.0);
+const float skTanHalfFov = 0.4;
+const uint skBounceCount = 8u;
+
+OpenPbrMaterial material_from_record(const InstanceRecord rec) {
+	OpenPbrMaterial mat;
+	mat.baseWeight = rec.baseWeight;
+	mat.baseColor = rec.baseColor;
+	mat.baseMetalness = rec.baseMetalness;
+	mat.baseDiffuseRoughness = rec.baseDiffuseRoughness;
+	mat.specularWeight = rec.specularWeight;
+	mat.specularColor = rec.specularColor;
+	mat.specularRoughness = rec.specularRoughness;
+	mat.specularRoughnessAnisotropy = rec.specularRoughnessAnisotropy;
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.specularIor = rec.specularIor;
+	mat.transmissionWeight = 0.0f;
+	mat.transmissionColor = f32v3(1.0f);
+	mat.transmissionDepth = 0.0f;
+	mat.transmissionScatter = f32v3(0.0f);
+	mat.transmissionScatterAnisotropy = 0.0f;
+	mat.transmissionDispersionScale = 0.0f;
+	mat.transmissionDispersionAbbeNumber = 20.0f;
+	mat.subsurfaceWeight = 0.0f;
+	mat.subsurfaceColor = f32v3(0.8f);
+	mat.subsurfaceRadius = 1.0f;
+	mat.subsurfaceRadiusScale = f32v3(1.0f);
+	mat.subsurfaceScatterAnisotropy = 0.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatColor = f32v3(1.0f);
+	mat.coatRoughness = 0.0f;
+	mat.coatRoughnessAnisotropy = 0.0f;
+	mat.coatIor = 1.6f;
+	mat.coatDarkening = 1.0f;
+	mat.fuzzWeight = 0.0f;
+	mat.fuzzColor = f32v3(1.0f);
+	mat.fuzzRoughness = 0.5f;
+	mat.emissionLuminance = 0.0f;
+	mat.emissionColor = f32v3(0.0f);
+	mat.thinFilmWeight = 0.0f;
+	mat.thinFilmThickness = 0.5f;
+	mat.thinFilmIor = 1.4f;
+	mat.geometryOpacity = 1.0f;
+	mat.geometryThinWalled = 0.0f;
+	return mat;
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	uint px = gl_GlobalInvocationID.x;
+	uint py = gl_GlobalInvocationID.y;
+	if (px >= pc.width || py >= pc.height) { return; }
+	uint pixel = py * pc.width + px;
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = pc.kullaContyHandle;
+	tables.zeltnerLtcParam = 0u;
+
+	InstanceRecordBuffer scene = InstanceRecordBuffer(pc.sceneVa);
+
+	// deterministic primary rays; image row 0 is the top (+y in world)
+	float ndcX = (2.0 * (float(px) + 0.5) / float(pc.width) - 1.0);
+	float ndcY = (2.0 * (float(py) + 0.5) / float(pc.height) - 1.0);
+	vec3 primaryDir = normalize(
+		vec3(ndcX * skTanHalfFov, -ndcY * skTanHalfFov, 1.0)
+	);
+
+	vec3 radianceSum = vec3(0.0);
+
+	for (uint s = 0u; s < pc.sampleCount; ++s) {
+		u32 h = fnPcgHash(pixel * 9781u + s + 1u);
+		f32 seed = uintBitsToFloat((h >> 9u) | 0x3F800000u) - 1.0f;
+		h = fnPcgHash(h);
+		f32v2 seed2;
+		seed2.x = uintBitsToFloat((h >> 9u) | 0x3F800000u) - 1.0f;
+		h = fnPcgHash(h);
+		seed2.y = uintBitsToFloat((h >> 9u) | 0x3F800000u) - 1.0f;
+
+		vec3 origin = skCameraOrigin;
+		vec3 dir = primaryDir;
+		vec3 throughput = vec3(1.0);
+
+		for (uint bounce = 0u; bounce < skBounceCount; ++bounce) {
+			rayQueryEXT rq;
+			rayQueryInitializeEXT(
+				/*rayQuery=*/rq,
+				/*topLevel=*/vkofTlas,
+				/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+				/*cullMask=*/0xFF,
+				/*origin=*/origin,
+				// tMin is zero: self-intersection is prevented by the
+				// origin offset along the normal; a positive tMin tunnels
+				// through adjacent walls at corners
+				/*tMin=*/0.0,
+				/*direction=*/dir,
+				/*tMax=*/100.0
+			);
+			while (rayQueryProceedEXT(rq)) { }
+
+			bool hit = (
+				rayQueryGetIntersectionTypeEXT(
+					/*rayQuery=*/rq, /*committed=*/true
+				)
+				!= gl_RayQueryCommittedIntersectionNoneEXT
+			);
+			if (!hit) { break; }
+
+			float t = rayQueryGetIntersectionTEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+			uint inst = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+
+			InstanceRecord rec = scene.data[inst];
+
+			// geometric normal from the hit triangle, transformed by the
+			// instance rotation (transforms are rotation + translation
+			// only; scale is baked into the blas vertices)
+			U32Buffer indices = U32Buffer(rec.indexVa);
+			F32v3Buffer verts = F32v3Buffer(rec.vertexVa);
+			f32v3 p0 = verts.data[indices.data[3u * prim + 0u]];
+			f32v3 p1 = verts.data[indices.data[3u * prim + 1u]];
+			f32v3 p2 = verts.data[indices.data[3u * prim + 2u]];
+			vec3 geomN = normalize(
+				mat3(objectToWorld) * cross(p1 - p0, p2 - p0)
+			);
+			vec3 n = geomN;
+			if (dot(n, dir) > 0.0) { n = -n; }
+
+			// one-sided emitter: only the winding front face emits (the
+			// light quad is wound facing down into the box)
+			if (dot(geomN, dir) < 0.0) {
+				radianceSum += throughput * rec.emission;
+			}
+
+			OpenPbrMaterial mat = material_from_record(rec);
+			ShadingFrame frame = shadingFrameFromNormal(n);
+			vec3 wi = -dir;
+
+			float pdf;
+			bool sampledTransmission;
+			uint pickedLobe;
+			vec3 wo = openPbrSampleWo(
+				tables,
+				frame,
+				frame,
+				wi,
+				mat,
+				pdf,
+				sampledTransmission,
+				pickedLobe,
+				seed,
+				seed2,
+				/*isInsideMedium=*/false,
+				/*dispersedIor=*/mat.specularIor
+			);
+			if (pdf <= 0.0 || dot(n, wo) <= 0.0) { break; }
+
+			vec3 f = openPbrEvaluateF(
+				tables,
+				frame,
+				frame,
+				wi,
+				wo,
+				mat,
+				/*isInsideMedium=*/false,
+				/*dispersedIor=*/mat.specularIor
+			);
+			throughput *= f * dot(n, wo) / pdf;
+
+			vec3 hitPos = origin + t * dir;
+			dir = wo;
+			origin = hitPos + n * 0.001;
+		}
+	}
+
+	vec3 radiance = radianceSum / float(pc.sampleCount);
+	uint pixelCount = pc.width * pc.height;
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	outBuf.data[pixel] = radiance.r;
+	outBuf.data[pixelCount + pixel] = radiance.g;
+	outBuf.data[2u * pixelCount + pixel] = radiance.b;
+}

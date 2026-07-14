@@ -1,0 +1,46 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+layout(buffer_reference, scalar) buffer U32Buffer {
+	uint data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+} pc;
+
+// Two invocations: 0 shoots toward the triangle, 1 shoots away.
+layout(local_size_x = 2) in;
+
+void main() {
+	// Triangle sits at z=1. Invocation 0 → hit, invocation 1 → miss.
+	vec3 dir = (
+		(gl_LocalInvocationID.x == 0u)
+		? vec3(0.0, 0.0, 1.0)
+		: vec3(0.0, 0.0, -1.0)
+	);
+
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(
+		/*rayQuery=*/rq,
+		/*topLevel=*/vkofTlas,
+		/*rayFlags=*/gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+		/*cullMask=*/0xFF,
+		/*origin=*/vec3(0.0, 0.0, 0.0),
+		/*tMin=*/0.001,
+		/*direction=*/dir,
+		/*tMax=*/100.0
+	);
+	rayQueryProceedEXT(rq);
+
+	bool hit = (
+		rayQueryGetIntersectionTypeEXT(/*rayQuery=*/rq, /*committed=*/true)
+		!= gl_RayQueryCommittedIntersectionNoneEXT
+	);
+	U32Buffer(pc.outVa).data[gl_LocalInvocationID.x] = hit ? 1u : 0u;
+}

@@ -1,0 +1,61 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-shading-frame.glsl"
+#include "util-roughness.glsl"
+#include "util-fresnel.glsl"
+#include "util-microfacet.glsl"
+#include "util-energy-compensation.glsl"
+#include "util-dielectric-specular.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
+
+// per sample, 12 floats: wi.xyz, wo.xyz, specularRoughness,
+// specularRoughnessAnisotropy, specularRoughnessAnisotropyRotation,
+// coatRoughness, coatWeight, etaRel. surface normal is fixed to (0,0,1),
+// wi/wo are supplied directly in that local space.
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 12u;
+	const f32v3 wi = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+	const f32v3 wo = (
+		f32v3(inBuf.data[base+3u], inBuf.data[base+4u], inBuf.data[base+5u])
+	);
+	const f32 specularRoughness = inBuf.data[base+6u];
+	const f32 specularRoughnessAnisotropy = inBuf.data[base+7u];
+	const f32 specularRoughnessAnisotropyRotation = inBuf.data[base+8u];
+	const f32 coatRoughness = inBuf.data[base+9u];
+	const f32 coatWeight = inBuf.data[base+10u];
+	const f32 etaRel = inBuf.data[base+11u];
+
+	ShadingFrame frame;
+	frame.tanX = f32v3(1.0f, 0.0f, 0.0f);
+	frame.tanY = f32v3(0.0f, 1.0f, 0.0f);
+	frame.nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	const f32v3 f = openPbrDielectricSpecularEvaluateF(
+		specularRoughness, specularRoughnessAnisotropy,
+		specularRoughnessAnisotropyRotation, coatRoughness, coatWeight,
+		frame, wi, wo, etaRel
+	);
+	F32v3Buffer(pc.outVa).data[i] = f;
+}

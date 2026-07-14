@@ -1,0 +1,43 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "util-shading-frame.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per sample, 6 floats: nor.xyz, tangent.xyz. output, 9 floats: tanX.xyz,
+// tanY.xyz, nor.xyz (passthrough)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 inBase = i * 6u;
+	const f32v3 nor = (
+		f32v3(inBuf.data[inBase+0u], inBuf.data[inBase+1u], inBuf.data[inBase+2u])
+	);
+	const f32v3 tangent = (
+		f32v3(inBuf.data[inBase+3u], inBuf.data[inBase+4u], inBuf.data[inBase+5u])
+	);
+
+	ShadingFrame frame = shadingFrameFromTangent(nor, tangent);
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	u32 outBase = i * 9u;
+	outBuf.data[outBase+0u] = frame.tanX.x; outBuf.data[outBase+1u] = frame.tanX.y;
+	outBuf.data[outBase+2u] = frame.tanX.z;
+	outBuf.data[outBase+3u] = frame.tanY.x; outBuf.data[outBase+4u] = frame.tanY.y;
+	outBuf.data[outBase+5u] = frame.tanY.z;
+	outBuf.data[outBase+6u] = frame.nor.x; outBuf.data[outBase+7u] = frame.nor.y;
+	outBuf.data[outBase+8u] = frame.nor.z;
+}
