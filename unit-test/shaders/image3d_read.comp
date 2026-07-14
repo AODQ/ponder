@@ -1,0 +1,36 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+
+layout(set = 0, binding = 5) uniform image3D vkofImages3D[];
+
+layout(buffer_reference, scalar) buffer FloatBuffer {
+	float data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t dstVa;
+	uint imgHandle;
+	uint W;
+	uint H;
+	uint D;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	uint total = pc.W * pc.H * pc.D;
+	uint idx = gl_GlobalInvocationID.x;
+	if (idx >= total) { return; }
+	uint x = idx % pc.W;
+	uint y = (idx / pc.W) % pc.H;
+	uint z = idx / (pc.W * pc.H);
+	float val = imageLoad(
+		vkofImages3D[nonuniformEXT(pc.imgHandle)],
+		ivec3(x, y, z)
+	).r;
+	FloatBuffer(pc.dstVa).data[idx] = val;
+}

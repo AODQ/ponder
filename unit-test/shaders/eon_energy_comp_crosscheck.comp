@@ -1,0 +1,49 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the diffuse-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-diffuse.glsl"
+
+#include "util-eon-materialx-reference.glsl"
+
+layout(buffer_reference, scalar) buffer F32v2Buffer { f32v2 data[]; };
+
+// per sample: f32v2(mu, sigma). output f32v2(mine, materialx) where mine is
+// the portsmouth polynomial fit and materialx is the exact closed-form
+// fujii directional albedo E_FON
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	const f32v2 s = F32v2Buffer(pc.inVa).data[i];
+	const f32 mine = utilOrenNayerEnergyCompensate(s.x, s.y);
+	const f32 ref = mxOrenNayarFujiiDiffuseDirAlbedo(s.x, s.y);
+	F32v2Buffer(pc.outVa).data[i] = f32v2(mine, ref);
+}

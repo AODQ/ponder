@@ -1,0 +1,132 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// observed side of the sampler-vs-pdf chi-square comparison (modeled on
+// cull app/shaders/bsdf-verify-histogram.comp, retargeted from the full
+// material to the individual ported samplers): draws pc.sampleCount
+// directions from the selected sampler and bins them over the sphere.
+// bin BSDF_VERIFY_BIN_COUNT is an overflow slot for non-finite or
+// non-unit directions, so a NaN can never alias into a real bin (uint(NaN)
+// is undefined in GLSL) and the tests can assert it stays empty.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-diffuse.glsl"
+#include "util-material-openpbr-fuzz.glsl"
+#include "util-sampling-bins.glsl"
+
+#define SAMPLING_MODE_GGX_BOUNDED_WO 0u
+#define SAMPLING_MODE_GGX_VNDF_H 1u
+#define SAMPLING_MODE_DIFFUSE_WO 2u
+#define SAMPLING_MODE_FUZZ_WO 3u
+#define SAMPLING_MODE_TRANSMISSION_ENTER 4u
+#define SAMPLING_MODE_TRANSMISSION_EXIT 5u
+
+layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
+
+// canonical local frame throughout: tanX=(1,0,0), tanY=(0,1,0),
+// nor=(0,0,1); pc.wi lives directly in it. alpha.y is ignored by the
+// vndf mode (isotropic sampler) and both alpha components by diffuse.
+// the fuzz mode repurposes alpha.xy as (fuzzA, fuzzB) rather than adding a
+// push-constant field; the transmission modes likewise repurpose alpha.xy
+// as (specularRoughness, ior), with the medium side encoded in the mode
+// (ENTER: etaI=1 outside going in; EXIT: etaI=ior inside going out).
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t histogramVa;
+	uint mode;
+	uint sampleCount;
+	uint seedSalt;
+	f32v3 wi;
+	f32v2 alpha;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint sampleIndex = gl_GlobalInvocationID.x;
+	if (sampleIndex >= pc.sampleCount) {
+		return;
+	}
+
+	const f32v3 tanX = f32v3(1.0f, 0.0f, 0.0f);
+	const f32v3 tanY = f32v3(0.0f, 1.0f, 0.0f);
+	const f32v3 nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	// need to not use blue-noise which is anti-correlated across pixels.
+	// just generate seeds over a pure pcg chain; hashes are chained so
+	// adjacent sample indices never share a stream value
+	const u32 h0 = fnPcgHash(sampleIndex + fnPcgHash(pc.seedSalt));
+	const u32 h1 = fnPcgHash(h0);
+	const u32 h2 = fnPcgHash(h1);
+	const f32v2 xi = f32v2(fnUintToUniform(h1), fnUintToUniform(h2));
+
+	f32v3 dir;
+	if (pc.mode == SAMPLING_MODE_GGX_BOUNDED_WO) {
+		dir = (
+			utilMicrofacetSampleGgxBoundedWoAniso(
+				tanX, tanY, nor, pc.wi, pc.alpha, xi
+			)
+		);
+	} else if (pc.mode == SAMPLING_MODE_GGX_VNDF_H) {
+		dir = utilMicrofacetSampleGgxVndf(nor, pc.wi, pc.alpha.x, xi);
+	} else if (pc.mode == SAMPLING_MODE_DIFFUSE_WO) {
+		// the production draw path: openPbrGlossyDiffuseSampleWo takes the
+		// uniform pair directly, exactly like the material shaders feed it
+		dir = openPbrGlossyDiffuseSampleWo(nor, xi);
+	} else if (
+		pc.mode == SAMPLING_MODE_TRANSMISSION_ENTER
+		|| pc.mode == SAMPLING_MODE_TRANSMISSION_EXIT
+	) {
+		// the production transmission draw path from openPbrSampleWo
+		// (util-material-openpbr.glsl), non-thin-walled: vndf half vector,
+		// refract, and the total-internal-reflection fallback that
+		// reflects wi about the sampled half vector instead
+		const bool isInsideMedium = pc.mode == SAMPLING_MODE_TRANSMISSION_EXIT;
+		const f32 ior = pc.alpha.y;
+		const f32 roughness = max(pc.alpha.x, 1e-5f);
+		const f32v3 h = utilMicrofacetSampleGgxVndf(nor, pc.wi, roughness, xi);
+		const f32 etaI = isInsideMedium ? ior : 1.0f;
+		const f32 etaT = isInsideMedium ? 1.0f : ior;
+		const f32v3 refracted = refract(-pc.wi, h, etaI / etaT);
+		if (length(refracted) > 0.5f) {
+			dir = refracted;
+		} else {
+			dir = normalize(2.0f * dot(pc.wi, h) * h - pc.wi);
+		}
+	} else {
+		// same production draw path convention as diffuse, above
+		dir = openPbrFuzzSampleWo(nor, pc.wi, pc.alpha.x, pc.alpha.y, xi);
+	}
+
+	const bool finite = (
+		!isnan(dir.x) && !isnan(dir.y) && !isnan(dir.z)
+		&& !isinf(dir.x) && !isinf(dir.y) && !isinf(dir.z)
+	);
+	const bool unit = finite && abs(length(dir) - 1.0f) < 1e-2f;
+	const uint bin = (
+		unit
+		? bsdfVerifyDirectionToBin(nor, dir)
+		: BSDF_VERIFY_BIN_COUNT
+	);
+
+	atomicAdd(U32Buffer(pc.histogramVa).data[bin], 1u);
+}

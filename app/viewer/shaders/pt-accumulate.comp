@@ -1,0 +1,42 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+
+#include "shared/global_pc.h"
+#include "pt-accumulate-pc.h"
+#include "util-tonemap.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const vec4 current = imageLoad(vkofImages[pc.ptAccumulate.inputHandle], coord);
+
+	vec4 accum;
+	if (pc.ptAccumulate.reset != 0u) {
+		accum = vec4(current.rgb, 1.0f);
+	} else {
+		const vec4 prev = imageLoad(vkofImages[pc.ptAccumulate.accumHandle], coord);
+		const float newCount = prev.a + 1.0f;
+		accum = vec4((prev.rgb * prev.a + current.rgb) / newCount, newCount);
+	}
+
+	imageStore(vkofImages[pc.ptAccumulate.accumHandle], coord, accum);
+
+	// apply HDR to result
+	const f32v4 outColor = f32v4(fnAces(accum.rgb * pc.global.exposure), 1.0f);
+
+	imageStore(
+		vkofImages[pc.ptAccumulate.outputHandle],
+		coord,
+		outColor
+	);
+}

@@ -1,0 +1,80 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+struct GpuMorMaterial {
+	vec4 baseColor;
+	float baseMetalness;
+	float specularRoughness;
+	vec3 emissiveColor;
+	float emissiveLuminance;
+	uint textureBaseColor;
+	uint textureNormal;
+	uint textureMetallicRoughness;
+	uint textureEmissive;
+	vec3 specularColor;
+	float specularWeight;
+	uint textureSpecular;
+	uint textureSpecularColor;
+	float specularIor;
+	float coatWeight;
+	float coatRoughness;
+	uint textureClearcoat;
+	uint textureClearcoatRoughness;
+	vec3 fuzzColor;
+	float fuzzWeight;
+	float fuzzRoughness;
+	uint textureFuzz;
+	float subsurfaceWeight;
+	vec3 subsurfaceColor;
+	float subsurfaceRadius;
+	uint textureSubsurface;
+	float transmissionWeight;
+	uint textureTransmission;
+	vec3 transmissionColor;
+	float transmissionDepth;
+	float thinFilmWeight;
+	float thinFilmIor;
+	float thinFilmThickness;
+	float thinFilmThicknessMin;
+	uint textureIridescence;
+	uint textureIridescenceThickness;
+	float specularRoughnessAnisotropy;
+	float specularAnisotropyRotation;
+	uint textureAnisotropy;
+	uint textureClearcoatNormal;
+	uint textureFuzzRoughness;
+	uint textureOcclusion;
+	float transmissionDispersionAbbeNumber;
+	float alphaCutoff;
+	float geometryOpacity;
+	uint flags;
+};
+
+layout(buffer_reference, scalar) buffer MaterialsBuffer {
+	GpuMorMaterial data[];
+};
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	float data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t materialsVa;
+	uint64_t outVa;
+	uint materialIndex;
+} pc;
+
+layout(local_size_x = 1) in;
+
+void main() {
+	GpuMorMaterial mat = MaterialsBuffer(pc.materialsVa).data[pc.materialIndex];
+	F32Buffer out_ = F32Buffer(pc.outVa);
+	out_.data[0] = mat.baseColor.r;
+	out_.data[1] = mat.baseColor.g;
+	out_.data[2] = mat.baseColor.b;
+	out_.data[3] = mat.baseColor.a;
+	out_.data[4] = mat.baseMetalness;
+	out_.data[5] = mat.specularRoughness;
+}

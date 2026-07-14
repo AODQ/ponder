@@ -1,0 +1,111 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+// generic ray-casting primitive probe: fires one ray per invocation against
+// whatever TLAS the test bound, and reports every piece of hit state a test
+// might need to cross-check against a cpu-side closed-form reference.
+struct RayProbe {
+	vec3 origin;
+	float tMin;
+	vec3 direction;
+	float tMax;
+	uint cullMask;
+};
+layout(buffer_reference, scalar) buffer RayProbeBuffer {
+	RayProbe data[];
+};
+
+struct RayHit {
+	uint hit;
+	float t;
+	uint instanceCustomIndex;
+	uint primitiveIndex;
+	float baryX;
+	float baryY;
+	// mat4x3 object-to-world, column-major (4 columns of 3 floats each),
+	// matching rayQueryGetIntersectionObjectToWorldEXT's own layout
+	float objectToWorld[12];
+};
+layout(buffer_reference, scalar) buffer RayHitBuffer {
+	RayHit data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t rayVa;
+	uint64_t outVa;
+	uint rayCount;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	uint idx = gl_GlobalInvocationID.x;
+	if (idx >= pc.rayCount) { return; }
+
+	RayProbeBuffer rays = RayProbeBuffer(pc.rayVa);
+	RayHitBuffer outHits = RayHitBuffer(pc.outVa);
+	RayProbe probe = rays.data[idx];
+
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(
+		/*rayQuery=*/rq,
+		/*topLevel=*/vkofTlas,
+		/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+		/*cullMask=*/probe.cullMask,
+		/*origin=*/probe.origin,
+		/*tMin=*/probe.tMin,
+		/*direction=*/probe.direction,
+		/*tMax=*/probe.tMax
+	);
+	while (rayQueryProceedEXT(rq)) { }
+
+	RayHit result;
+	bool hit = (
+		rayQueryGetIntersectionTypeEXT(/*rayQuery=*/rq, /*committed=*/true)
+		!= gl_RayQueryCommittedIntersectionNoneEXT
+	);
+	result.hit = hit ? 1u : 0u;
+	if (hit) {
+		result.t = rayQueryGetIntersectionTEXT(
+			/*rayQuery=*/rq, /*committed=*/true
+		);
+		result.instanceCustomIndex = uint(
+			rayQueryGetIntersectionInstanceCustomIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			)
+		);
+		result.primitiveIndex = uint(
+			rayQueryGetIntersectionPrimitiveIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			)
+		);
+		vec2 bary = rayQueryGetIntersectionBarycentricsEXT(
+			/*rayQuery=*/rq, /*committed=*/true
+		);
+		result.baryX = bary.x;
+		result.baryY = bary.y;
+		mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(
+			/*rayQuery=*/rq, /*committed=*/true
+		);
+		for (uint col = 0u; col < 4u; ++col) {
+			for (uint row = 0u; row < 3u; ++row) {
+				result.objectToWorld[col * 3u + row] = o2w[col][row];
+			}
+		}
+	} else {
+		result.t = 0.0;
+		result.instanceCustomIndex = 0xFFFFFFFFu;
+		result.primitiveIndex = 0xFFFFFFFFu;
+		result.baryX = 0.0;
+		result.baryY = 0.0;
+		for (uint i = 0u; i < 12u; ++i) {
+			result.objectToWorld[i] = 0.0;
+		}
+	}
+	outHits.data[idx] = result;
+}

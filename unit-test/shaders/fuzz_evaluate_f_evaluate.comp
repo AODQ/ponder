@@ -1,0 +1,81 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// evaluate shader for the ported layered fuzz eval (openPbrFuzzEvaluateF),
+// using the real zeltner ltc table.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-fuzz.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per sample, 17 floats in: nor.xyz, wi.xyz, wo.xyz, fuzzWeight,
+// fuzzColor.rgb, fuzzRoughness, coatedBase.rgb. output 3 floats:
+// openPbrFuzzEvaluateF(tables, mat, coatedBase, nor, wi, wo).
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint tableHandle;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 17u;
+	const f32v3 nor = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+	const f32v3 wi = (
+		f32v3(inBuf.data[base+3u], inBuf.data[base+4u], inBuf.data[base+5u])
+	);
+	const f32v3 wo = (
+		f32v3(inBuf.data[base+6u], inBuf.data[base+7u], inBuf.data[base+8u])
+	);
+	const f32 fuzzWeight = inBuf.data[base+9u];
+	const f32v3 fuzzColor = (
+		f32v3(inBuf.data[base+10u], inBuf.data[base+11u], inBuf.data[base+12u])
+	);
+	const f32 fuzzRoughness = inBuf.data[base+13u];
+	const f32v3 coatedBase = (
+		f32v3(inBuf.data[base+14u], inBuf.data[base+15u], inBuf.data[base+16u])
+	);
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = 0u;
+	tables.zeltnerLtcParam = pc.tableHandle;
+
+	OpenPbrMaterial mat;
+	mat.fuzzWeight = fuzzWeight;
+	mat.fuzzColor = fuzzColor;
+	mat.fuzzRoughness = fuzzRoughness;
+
+	const f32v3 f = (
+		openPbrFuzzEvaluateF(tables, mat, coatedBase, nor, wi, wo)
+	);
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	outBuf.data[i*3u+0u] = f.x;
+	outBuf.data[i*3u+1u] = f.y;
+	outBuf.data[i*3u+2u] = f.z;
+}

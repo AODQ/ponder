@@ -1,0 +1,303 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "util-random.glsl"
+
+// second consumer of the full ported material chain (after
+// cornell_openpbr_render.comp): this one also drives the transmission lobe
+// through actual glass-volume bounces, so unlike its sibling it tracks
+// whether the path currently sits inside a dielectric medium
+#include "util-material-openpbr.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+layout(buffer_reference, scalar) buffer F32v3Buffer {
+	f32v3 data[];
+};
+layout(buffer_reference, scalar) buffer U32Buffer {
+	u32 data[];
+};
+
+// per-instance geometry + material record, uploaded by the test. layout
+// must match InstanceRecord in test-cornell-glass.cpp (scalar packing).
+// extends cornell_openpbr_render.comp's InstanceRecord with the
+// transmission fields needed for glass
+struct InstanceRecord {
+	uint64_t vertexVa;
+	uint64_t indexVa;
+	f32v3 baseColor;
+	f32 baseWeight;
+	f32 baseMetalness;
+	f32 baseDiffuseRoughness;
+	f32 specularWeight;
+	f32 specularRoughness;
+	f32v3 specularColor;
+	f32 specularRoughnessAnisotropy;
+	f32v3 emission;
+	f32 specularIor;
+	f32 transmissionWeight;
+	f32v3 transmissionColor;
+};
+layout(buffer_reference, scalar) buffer InstanceRecordBuffer {
+	InstanceRecord data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint64_t sceneVa;
+	uint width;
+	uint height;
+	uint sampleCount;
+	uint kullaContyHandle;
+	uint bounceCount;
+	float cameraOriginX;
+	float cameraOriginY;
+	float cameraOriginZ;
+	// rotation around the camera's local x axis applied to the primary ray
+	// direction, so one shader serves scenes shot straight-on (pitch 0,
+	// matching cornell_openpbr_render.comp's fixed camera) and scenes shot
+	// from above looking down (checkerboard floor, sphere grid)
+	float cameraPitch;
+} pc;
+
+const float skTanHalfFov = 0.45;
+
+OpenPbrMaterial material_from_record(const InstanceRecord rec) {
+	OpenPbrMaterial mat;
+	mat.baseWeight = rec.baseWeight;
+	mat.baseColor = rec.baseColor;
+	mat.baseMetalness = rec.baseMetalness;
+	mat.baseDiffuseRoughness = rec.baseDiffuseRoughness;
+	mat.specularWeight = rec.specularWeight;
+	mat.specularColor = rec.specularColor;
+	mat.specularRoughness = rec.specularRoughness;
+	mat.specularRoughnessAnisotropy = rec.specularRoughnessAnisotropy;
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.specularIor = rec.specularIor;
+	mat.transmissionWeight = rec.transmissionWeight;
+	mat.transmissionColor = rec.transmissionColor;
+	mat.transmissionDepth = 0.0f;
+	mat.transmissionScatter = f32v3(0.0f);
+	mat.transmissionScatterAnisotropy = 0.0f;
+	mat.transmissionDispersionScale = 0.0f;
+	mat.transmissionDispersionAbbeNumber = 20.0f;
+	mat.subsurfaceWeight = 0.0f;
+	mat.subsurfaceColor = f32v3(0.8f);
+	mat.subsurfaceRadius = 1.0f;
+	mat.subsurfaceRadiusScale = f32v3(1.0f);
+	mat.subsurfaceScatterAnisotropy = 0.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatColor = f32v3(1.0f);
+	mat.coatRoughness = 0.0f;
+	mat.coatRoughnessAnisotropy = 0.0f;
+	mat.coatIor = 1.6f;
+	mat.coatDarkening = 1.0f;
+	mat.fuzzWeight = 0.0f;
+	mat.fuzzColor = f32v3(1.0f);
+	mat.fuzzRoughness = 0.5f;
+	mat.emissionLuminance = 0.0f;
+	mat.emissionColor = f32v3(0.0f);
+	mat.thinFilmWeight = 0.0f;
+	mat.thinFilmThickness = 0.5f;
+	mat.thinFilmIor = 1.4f;
+	mat.geometryOpacity = 1.0f;
+	// every glass shape in this shader's test scenes is a solid or shelled
+	// dielectric volume (khr_materials_volume-style), never the infinitely
+	// thin khr_materials_transmission-only shell, so the transmission lobe
+	// always takes the vndf-refraction branch and the medium toggle below
+	// always has a well-defined enter/exit pair
+	mat.geometryThinWalled = 0.0f;
+	return mat;
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	uint px = gl_GlobalInvocationID.x;
+	uint py = gl_GlobalInvocationID.y;
+	if (px >= pc.width || py >= pc.height) { return; }
+	uint pixel = py * pc.width + px;
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = pc.kullaContyHandle;
+	tables.zeltnerLtcParam = 0u;
+
+	InstanceRecordBuffer scene = InstanceRecordBuffer(pc.sceneVa);
+
+	// deterministic primary rays; image row 0 is the top (+y in world).
+	// cameraPitch rotates the local look direction around the camera's x
+	// axis before it is used as a world-space direction (all test scenes
+	// keep the camera unrolled, so no further roll/yaw term is needed)
+	float ndcX = (2.0 * (float(px) + 0.5) / float(pc.width) - 1.0);
+	float ndcY = (2.0 * (float(py) + 0.5) / float(pc.height) - 1.0);
+	vec3 localDir = normalize(
+		vec3(ndcX * skTanHalfFov, -ndcY * skTanHalfFov, 1.0)
+	);
+	float cp = cos(pc.cameraPitch);
+	float sp = sin(pc.cameraPitch);
+	vec3 primaryDir = vec3(
+		localDir.x,
+		localDir.y * cp - localDir.z * sp,
+		localDir.y * sp + localDir.z * cp
+	);
+	vec3 cameraOrigin = vec3(
+		pc.cameraOriginX, pc.cameraOriginY, pc.cameraOriginZ
+	);
+
+	vec3 radianceSum = vec3(0.0);
+
+	for (uint s = 0u; s < pc.sampleCount; ++s) {
+		const u32 h0 = fnPcgHash(pixel * 9781u + s + 1u);
+		const u32 h1 = fnPcgHash(h0);
+		u64 state = (u64(h0) << 32) | u64(h1);
+
+		vec3 origin = cameraOrigin;
+		vec3 dir = primaryDir;
+		vec3 throughput = vec3(1.0);
+		// every camera ray starts in air; toggled true/false on each true
+		// refraction event (sampledTransmission), so it tracks whether the
+		// path is currently traveling inside a dielectric volume. this is
+		// a single flag, not a nested-medium stack: correct exactly because
+		// every test scene's glass shapes are non-overlapping and always
+		// have air (not another glass) on their far side, so every
+		// interface the path crosses is an air<->this-object's-glass pair
+		bool insideMedium = false;
+
+		for (uint bounce = 0u; bounce < pc.bounceCount; ++bounce) {
+			rayQueryEXT rq;
+			rayQueryInitializeEXT(
+				/*rayQuery=*/rq,
+				/*topLevel=*/vkofTlas,
+				/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+				/*cullMask=*/0xFF,
+				/*origin=*/origin,
+				// tMin is zero: self-intersection is prevented by the
+				// origin offset along the normal; a positive tMin tunnels
+				// through adjacent walls at corners
+				/*tMin=*/0.0,
+				/*direction=*/dir,
+				/*tMax=*/100.0
+			);
+			while (rayQueryProceedEXT(rq)) { }
+
+			bool hit = (
+				rayQueryGetIntersectionTypeEXT(
+					/*rayQuery=*/rq, /*committed=*/true
+				)
+				!= gl_RayQueryCommittedIntersectionNoneEXT
+			);
+			if (!hit) { break; }
+
+			float t = rayQueryGetIntersectionTEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+			uint inst = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+
+			InstanceRecord rec = scene.data[inst];
+
+			// geometric normal from the hit triangle, transformed by the
+			// instance rotation (transforms are rotation + translation
+			// only; scale is baked into the blas vertices)
+			U32Buffer indices = U32Buffer(rec.indexVa);
+			F32v3Buffer verts = F32v3Buffer(rec.vertexVa);
+			f32v3 p0 = verts.data[indices.data[3u * prim + 0u]];
+			f32v3 p1 = verts.data[indices.data[3u * prim + 1u]];
+			f32v3 p2 = verts.data[indices.data[3u * prim + 2u]];
+			vec3 geomN = normalize(
+				mat3(objectToWorld) * cross(p1 - p0, p2 - p0)
+			);
+			vec3 n = geomN;
+			if (dot(n, dir) > 0.0) { n = -n; }
+
+			// one-sided emitter: only the winding front face emits (the
+			// light quad is wound facing down into the scene)
+			if (dot(geomN, dir) < 0.0) {
+				radianceSum += throughput * rec.emission;
+			}
+
+			OpenPbrMaterial mat = material_from_record(rec);
+			ShadingFrame frame = shadingFrameFromNormal(n);
+			vec3 wi = -dir;
+
+			float pdf;
+			bool sampledTransmission;
+			uint pickedLobe;
+			vec3 wo = openPbrSampleWo(
+				tables,
+				frame,
+				frame,
+				wi,
+				mat,
+				pdf,
+				sampledTransmission,
+				pickedLobe,
+				state,
+				insideMedium,
+				// this hit's own ior; each glass object in these test
+				// scenes only ever has air on its far side (see
+				// insideMedium's declaration comment above), so the
+				// object just hit is always the correct dispersedIor
+				// regardless of how many media the path has already
+				// crossed
+				mat.specularIor
+			);
+			// unlike cornell_openpbr_render.comp (opaque materials only,
+			// wo always reflects into the same hemisphere as n), a
+			// transmitted wo legitimately lands in the opposite
+			// hemisphere: only a non-positive pdf marks a dead sample here
+			if (pdf <= 0.0) { break; }
+
+			vec3 f = openPbrEvaluateF(
+				tables,
+				frame,
+				frame,
+				wi,
+				wo,
+				mat,
+				insideMedium,
+				mat.specularIor
+			);
+			// abs(), not the signed dot: openPbrTransmissionEvaluateF's
+			// thin-walled/matched-ior branch is normalized against
+			// |dot(nor,wo)| (see its header comment) precisely because a
+			// transmitted wo sits on the far side of n from wi
+			throughput *= f * abs(dot(n, wo)) / pdf;
+
+			if (sampledTransmission) { insideMedium = !insideMedium; }
+
+			vec3 hitPos = origin + t * dir;
+			dir = wo;
+			// offset along whichever side of n the continuing ray actually
+			// heads into: +n for a reflection (dot(n,wo) > 0), -n for a
+			// transmission crossing to the far side (dot(n,wo) < 0).
+			// offsetting along a fixed +n regardless of side would push a
+			// transmitted ray's origin back across the surface it just
+			// crossed, re-hitting the same triangle at t~0
+			origin = hitPos + (dot(n, wo) > 0.0 ? n : -n) * 0.001;
+		}
+	}
+
+	vec3 radiance = radianceSum / float(pc.sampleCount);
+	uint pixelCount = pc.width * pc.height;
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	outBuf.data[pixel] = radiance.r;
+	outBuf.data[pixelCount + pixel] = radiance.g;
+	outBuf.data[2u * pixelCount + pixel] = radiance.b;
+}

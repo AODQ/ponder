@@ -1,0 +1,169 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+
+#include "util-material-openpbr.glsl"
+
+// independent cross-check of openPbrLobeSelection's *combination* arithmetic
+// (the budget split / max / sum that turns five per-lobe weights into
+// selection probabilities), not of the per-lobe weight formulas themselves.
+// utilMicrofacetDielectricAlbedo (coat/specular dielectric albedo),
+// utilZeltnerFuzzLookup (fuzz R channel), openPbrCoatRoughenedRoughness and
+// openPbrEffectiveIor are called by both "mine" and "ref" below and are
+// treated as already-independently-verified trusted inputs (dielectric-
+// specular, fuzz and metallic milestones) -- there is no materialx mixture-
+// bsdf equivalent to re-derive them against here, and the brief for this
+// milestone explicitly scopes re-verification to the combination, not the
+// primitives. the ref side is re-typed from the openpbr spec's stated
+// layering split (opaque base = mix(diffuse, translucent, T); dielectric
+// base under coat/specular/fuzz) rather than copied from
+// openPbrLobeSelection's glsl, to catch a transcription slip (wrong
+// variable, wrong operator, swapped budget term) in the original -- the
+// formula itself is short enough that there isn't a materially different
+// way to derive it, so independence here is weaker than the transmission/
+// metallic crosschecks; documented rather than overstated.
+OpenPbrLobeSelection openPbrLobeSelectionRef(
+	const MaterialTableHandles tables,
+	const float mu,
+	const float coatWeight,
+	const float coatRoughness,
+	const float coatIor,
+	const float specularWeight,
+	const float specularIor,
+	const float specularRoughness,
+	const float baseMetalness,
+	const float transmissionWeight,
+	const float fuzzWeight,
+	const float fuzzRoughness
+) {
+	const float refCoatIorRatio = (coatIor - 1.0f) / (coatIor + 1.0f);
+	const float refCoatF0 = refCoatIorRatio * refCoatIorRatio;
+	const float refCoat = (
+		coatWeight
+		* utilMicrofacetDielectricAlbedo(mu, coatRoughness, refCoatF0)
+	);
+
+	const float refEtaEff = openPbrEffectiveIor(specularIor, specularWeight);
+	const float refIorRatio = (refEtaEff - 1.0f) / (refEtaEff + 1.0f);
+	const float refF0 = refIorRatio * refIorRatio;
+	const float refRoughenedSpecRoughness = (
+		openPbrCoatRoughenedRoughness(specularRoughness, coatRoughness, coatWeight)
+	);
+	const float refSpecDielectric = (
+		utilMicrofacetDielectricAlbedo(mu, refRoughenedSpecRoughness, refF0)
+	);
+	const float refSpecular = max(refSpecDielectric, baseMetalness);
+
+	// the base budget remaining once metalness has taken its share, split
+	// between the opaque (diffuse) and translucent (transmission) base by
+	// transmission_weight -- openpbr spec section on base substrate mixing
+	const float refBaseBudget = 1.0f - baseMetalness;
+	const float refDiffuse = refBaseBudget * (1.0f - transmissionWeight);
+	const float refTransmission = refBaseBudget * transmissionWeight;
+
+	const vec3 refFuzzParams = (
+		utilZeltnerFuzzLookup(tables, mu, fuzzRoughness)
+	);
+	const float refFuzz = fuzzWeight * refFuzzParams.z;
+
+	OpenPbrLobeSelection sel;
+	sel.probabilityCoat = refCoat;
+	sel.probabilitySpecular = refSpecular;
+	sel.probabilityDiffuse = refDiffuse;
+	sel.probabilityFuzz = refFuzz;
+	sel.probabilityTransmission = refTransmission;
+	sel.probabilityTotal = (
+		refCoat + refSpecular + refDiffuse + refFuzz + refTransmission
+	);
+	sel.fuzzA = refFuzzParams.x;
+	sel.fuzzB = refFuzzParams.y;
+	return sel;
+}
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per config, 11 floats in: mu, coatWeight, coatRoughness, coatIor,
+// specularWeight, specularIor, specularRoughness, baseMetalness,
+// transmissionWeight, fuzzWeight, fuzzRoughness.
+// output, 6 floats each for mine/ref: probabilityCoat, probabilitySpecular,
+// probabilityDiffuse, probabilityFuzz, probabilityTransmission,
+// probabilityTotal
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t mineOutVa;
+	uint64_t refOutVa;
+	uint zeltnerLtcParamHandle;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	const uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	const uint base = i * 11u;
+	const float mu = inBuf.data[base+0u];
+	const float coatWeight = inBuf.data[base+1u];
+	const float coatRoughness = inBuf.data[base+2u];
+	const float coatIor = inBuf.data[base+3u];
+	const float specularWeight = inBuf.data[base+4u];
+	const float specularIor = inBuf.data[base+5u];
+	const float specularRoughness = inBuf.data[base+6u];
+	const float baseMetalness = inBuf.data[base+7u];
+	const float transmissionWeight = inBuf.data[base+8u];
+	const float fuzzWeight = inBuf.data[base+9u];
+	const float fuzzRoughness = inBuf.data[base+10u];
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = 0u;
+	tables.zeltnerLtcParam = pc.zeltnerLtcParamHandle;
+
+	OpenPbrMaterial mat;
+	mat.coatWeight = coatWeight;
+	mat.coatRoughness = coatRoughness;
+	mat.coatIor = coatIor;
+	mat.specularWeight = specularWeight;
+	mat.specularIor = specularIor;
+	mat.specularRoughness = specularRoughness;
+	mat.specularRoughnessAnisotropy = 0.0f;
+	mat.baseMetalness = baseMetalness;
+	mat.transmissionWeight = transmissionWeight;
+	mat.fuzzWeight = fuzzWeight;
+	mat.fuzzRoughness = fuzzRoughness;
+
+	const OpenPbrLobeSelection mine = openPbrLobeSelection(tables, mat, mu);
+	const OpenPbrLobeSelection ref = (
+		openPbrLobeSelectionRef(
+			tables, mu,
+			coatWeight, coatRoughness, coatIor,
+			specularWeight, specularIor, specularRoughness,
+			baseMetalness, transmissionWeight, fuzzWeight, fuzzRoughness
+		)
+	);
+
+	F32Buffer mineOut = F32Buffer(pc.mineOutVa);
+	const uint outBase = i * 6u;
+	mineOut.data[outBase+0u] = mine.probabilityCoat;
+	mineOut.data[outBase+1u] = mine.probabilitySpecular;
+	mineOut.data[outBase+2u] = mine.probabilityDiffuse;
+	mineOut.data[outBase+3u] = mine.probabilityFuzz;
+	mineOut.data[outBase+4u] = mine.probabilityTransmission;
+	mineOut.data[outBase+5u] = mine.probabilityTotal;
+
+	F32Buffer refOut = F32Buffer(pc.refOutVa);
+	refOut.data[outBase+0u] = ref.probabilityCoat;
+	refOut.data[outBase+1u] = ref.probabilitySpecular;
+	refOut.data[outBase+2u] = ref.probabilityDiffuse;
+	refOut.data[outBase+3u] = ref.probabilityFuzz;
+	refOut.data[outBase+4u] = ref.probabilityTransmission;
+	refOut.data[outBase+5u] = ref.probabilityTotal;
+}

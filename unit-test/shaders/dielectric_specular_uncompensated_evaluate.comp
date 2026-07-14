@@ -1,0 +1,102 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-shading-frame.glsl"
+#include "util-roughness.glsl"
+#include "util-fresnel.glsl"
+#include "util-microfacet.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
+
+// per sample, 12 floats: wi.xyz, wo.xyz, specularRoughness,
+// specularRoughnessAnisotropy, specularRoughnessAnisotropyRotation,
+// coatRoughness, coatWeight, etaRel (coatRoughness/coatWeight/etaRel
+// unused by the reciprocity test but kept for layout symmetry with the
+// full-evaluate shader)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+// test-only: same as openPbrDielectricSpecularEvaluateF but without the
+// (view-only-dependent, reciprocity-breaking) turquin energy compensation
+// multiplier -- used to test reciprocity of just the base fresnel*D*V lobe
+f32v3 evaluateUncompensated(
+	const f32 specularRoughness,
+	const f32 specularRoughnessAnisotropy,
+	const f32 specularRoughnessAnisotropyRotation,
+	const f32 coatRoughness,
+	const f32 coatWeight,
+	const ShadingFrame frame,
+	const f32v3 wi,
+	const f32v3 wo,
+	const f32 etaRel
+) {
+	const f32 roughenedRoughness = (
+		openPbrCoatRoughenedRoughness(specularRoughness, coatRoughness, coatWeight)
+	);
+	const f32v2 alpha = (
+		openPbrRoughnessAlpha(roughenedRoughness, specularRoughnessAnisotropy)
+	);
+	const ShadingFrame specFrame = (
+		shadingFrameRotate(frame, specularRoughnessAnisotropyRotation)
+	);
+	const f32v3 wiLocal = (
+		f32v3(
+			dot(wi, specFrame.tanX), dot(wi, specFrame.tanY), dot(wi, specFrame.nor)
+		)
+	);
+	const f32v3 woLocal = (
+		f32v3(
+			dot(wo, specFrame.tanX), dot(wo, specFrame.tanY), dot(wo, specFrame.nor)
+		)
+	);
+	const f32v3 hLocal = normalize(wiLocal + woLocal);
+	const f32 dotHWi = dot(hLocal, wiLocal);
+	const f32v3 mfFresnel = f32v3(utilFresnelDielectric(dotHWi, etaRel));
+	const f32 mfDistribution = utilMicrofacetGgxDistributionAniso(hLocal, alpha);
+	const f32 mfVisibility = (
+		utilMicrofacetSmithGgxVisibilityAniso(wiLocal, woLocal, alpha)
+	);
+	return mfFresnel * mfDistribution * mfVisibility;
+}
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 12u;
+	const f32v3 wi = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+	const f32v3 wo = (
+		f32v3(inBuf.data[base+3u], inBuf.data[base+4u], inBuf.data[base+5u])
+	);
+	const f32 specularRoughness = inBuf.data[base+6u];
+	const f32 specularRoughnessAnisotropy = inBuf.data[base+7u];
+	const f32 specularRoughnessAnisotropyRotation = inBuf.data[base+8u];
+	const f32 coatRoughness = inBuf.data[base+9u];
+	const f32 coatWeight = inBuf.data[base+10u];
+	const f32 etaRel = inBuf.data[base+11u];
+
+	ShadingFrame frame;
+	frame.tanX = f32v3(1.0f, 0.0f, 0.0f);
+	frame.tanY = f32v3(0.0f, 1.0f, 0.0f);
+	frame.nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	F32v3Buffer(pc.outVa).data[i] = evaluateUncompensated(
+		specularRoughness, specularRoughnessAnisotropy,
+		specularRoughnessAnisotropyRotation, coatRoughness, coatWeight,
+		frame, wi, wo, etaRel
+	);
+}

@@ -1,0 +1,51 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+
+// scans the raw per-frame radiance image for broken pixels and tallies
+// them into a host-readable counter buffer. two things count as broken:
+//   * a true NaN/Inf bit pattern in any channel -- these reach the image
+//     when a path escapes utilIrradiancePropagationEntry's NaN guard (a
+//     NaN accumulator with no recorded hit is returned as-is)
+//   * the guard's own sentinel: NaN accumulators WITH a hit are rewritten
+//     to exactly (9999, 0, 0) so they show as pure red instead of
+//     poisoning the accumulation buffer; the write is a constant, so an
+//     exact float compare recovers it here
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+
+#include "shared/global_pc.h"
+#include "nan-check-pc.h"
+
+layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (coord.x >= int(pc.nanCheck.width) || coord.y >= int(pc.nanCheck.height)) {
+		return;
+	}
+	const f32v4 v = imageLoad(vkofImages[pc.nanCheck.inputHandle], coord);
+
+	U32Buffer counts = U32Buffer(pc.nanCheck.countsVa);
+	const bool isSentinel = (
+		v.r == 9999.0f && v.g == 0.0f && v.b == 0.0f
+	);
+	if (
+		isSentinel
+		|| isnan(v.r) || isnan(v.g) || isnan(v.b) || isnan(v.a)
+	) {
+		atomicAdd(counts.data[0], 1u);
+		return;
+	}
+	if (isinf(v.r) || isinf(v.g) || isinf(v.b) || isinf(v.a)) {
+		atomicAdd(counts.data[1], 1u);
+	}
+}

@@ -1,0 +1,162 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_debug_printf : enable
+
+// path-traced resolve pass: reconstruct the primary camera ray, trace it,
+// load the hit's OpenPBR material, and propagate irradiance through the
+// scene (util-raytrace.glsl). writes raw (un-tonemapped) radiance;
+// pt-accumulate.comp owns temporal accumulation, exposure, and tonemap
+
+// enables lib/ponder's util-nan-probe.glsl NAN_CHECK* call sites (see
+// util-material-openpbr.glsl); must be defined before the first #include
+// that reaches util-nan-probe.glsl, since its macros are picked at that
+// file's first inclusion. remove this line to strip every probe back to a
+// no-op without touching lib/ponder at all
+#define PONDER_NAN_PROBES
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+layout(set = 0, binding = 4) uniform sampler3D vkofTextures3D[];
+
+#include "mor/mor-shared.h"
+#include "resolve_pc.h"
+#include "environment.glsl"
+
+#include "util-random.glsl"
+#include "util-raytrace.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const GpuDebugPC unf = GpuDebugPCBuffer(pc.global.debug).data;
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
+	if (coord.x >= screensize.x || coord.y >= screensize.y) { return; }
+	nanProbeInit(unf.nanProbeCounterVa, coord);
+
+	u64 state;
+	u64 state2;
+	f32 seed;
+	f32v2 seed2;
+	{
+		const u32 bluenoiseTextureHandle = (
+			GpuBluenoiseHandleBuffer(pc.resolve.bluenoiseVa).data[
+				pc.resolve.frameIndex % pc.resolve.bluenoiseCount
+			]
+		);
+		utilGenerateSeeds(
+			state, state2, seed, seed2,
+			/*frameIndex=*/ pc.resolve.frameIndex,
+			/*salt=*/ 0u,
+			bluenoiseTextureHandle
+		);
+	}
+
+	// -- camera ray: reconstruct the primary ray; antialiasing jitters the
+	// subpixel position per sample, otherwise every sample goes through the
+	// exact pixel center
+	const f32v2 jitter = unf.antialias != 0u ? seed2 : f32v2(0.5f);
+	const f32v2 uv = (f32v2(coord) + jitter) / f32v2(screensize);
+	const f32v2 ndc = uv * 2.0f - 1.0f;
+	const mat4 invVP = inverse(pc.global.viewProj);
+	const f32v4 worldFar = invVP * f32v4(ndc, 1.0f, 1.0f);
+	const f32v3 rayDir = normalize(worldFar.xyz / worldFar.w - pc.global.cameraPos);
+
+	const RayQueryResult primaryHit = (
+		utilTraceRay(
+			pc.global.cameraPos,
+			rayDir,
+			999999.0f,
+			/*isShadowRay=*/false,
+			/*testAlphaCutoff=*/true
+		)
+	);
+
+	if (primaryHit.dist <= 0.0f) {
+		imageStore(
+			vkofImages[pc.resolve.outputImageHandle],
+			coord,
+			f32v4(
+				sampleEnvironment(rayDir, unf.envIntensity, unf.envMode),
+				1.0f
+			)
+		);
+		return;
+	}
+
+	UtilMeshAttributeDataFromIndices rqData = (
+		utilMeshAttributeDataFromIndices(
+			primaryHit.modelDrawIndex,
+			primaryHit.primitiveIndex,
+			primaryHit.barycentric
+		)
+	);
+	// material inspector probe: unf.probePixel is (-1,-1) on every frame
+	// except the one right after a right-click, so this only ever prints
+	// for the single invocation whose pixel the user actually clicked
+	if (coord == unf.probePixel) {
+		debugPrintfEXT("MODEL ID: %d", rqData.materialIndex);
+	}
+	const f32v3 origin = pc.global.cameraPos + rayDir * primaryHit.dist;
+	const mat3 tbn = utilCalculateTbnBasis(rqData.normal, rqData.tangent);
+	f32v3 modelNormal;
+	f32v4 modelTangent;
+	f32v3 modelCoatNormal;
+	f32v4 modelCoatTangent;
+	const OpenPbrMaterial bsdfMaterial = (
+		openPbrLoadMaterialDeriv(
+			/*mat=*/ rqData.material,
+			/*uvTransforms=*/rqData.uvTransforms,
+			/*uv=*/rqData.uv,
+			/*uvDx=*/f32v2(0.0f),
+			/*uvDy=*/f32v2(0.0f),
+			modelNormal, modelTangent, modelCoatNormal, modelCoatTangent
+		)
+	);
+	const f32v3 normalWorld = normalize(tbn * modelNormal);
+	const ShadingFrame frame = (
+		shadingFrameFromTangent(normalWorld, rqData.tangent.xyz)
+	);
+	const ShadingFrame coatFrame = (
+		shadingFrameFromTangent(
+			normalize(tbn * modelCoatNormal), rqData.tangent.xyz
+		)
+	);
+	const f32v3 normalGeometrical = rqData.normalGeometrical;
+	const f32v3 wi = -rayDir;
+
+	const MaterialTableHandles materialTables = (
+		MaterialTableHandles(
+			pc.resolve.kullaContyEnergyHandle,
+			pc.resolve.zeltnerLtcParamHandle
+		)
+	);
+
+	const f32v4 irradiance = (
+		utilIrradiancePropagationEntry(
+			/*tables=*/materialTables,
+			/*originalMaterial=*/bsdfMaterial,
+			/*origin=*/origin,
+			/*frame=*/frame,
+			/*coatFrame=*/coatFrame,
+			/*normalGeometrical=*/normalGeometrical,
+			/*wi=*/wi,
+			/*propagationDepth=*/8u,
+			/*state=*/state
+		)
+	);
+
+	imageStore(
+		vkofImages[pc.resolve.outputImageHandle],
+		coord,
+		irradiance
+	);
+}

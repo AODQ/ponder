@@ -1,0 +1,48 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "util-shading-frame.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per sample, 10 floats: tanX.xyz, tanY.xyz, nor.xyz, rotation. output, 9
+// floats: rotatedTanX.xyz, rotatedTanY.xyz, rotatedNor.xyz
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 inBase = i * 10u;
+	ShadingFrame frame;
+	frame.tanX = (
+		f32v3(inBuf.data[inBase+0u], inBuf.data[inBase+1u], inBuf.data[inBase+2u])
+	);
+	frame.tanY = (
+		f32v3(inBuf.data[inBase+3u], inBuf.data[inBase+4u], inBuf.data[inBase+5u])
+	);
+	frame.nor = (
+		f32v3(inBuf.data[inBase+6u], inBuf.data[inBase+7u], inBuf.data[inBase+8u])
+	);
+	const f32 rotation = inBuf.data[inBase+9u];
+
+	ShadingFrame rotated = shadingFrameRotate(frame, rotation);
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	u32 outBase = i * 9u;
+	outBuf.data[outBase+0u] = rotated.tanX.x; outBuf.data[outBase+1u] = rotated.tanX.y;
+	outBuf.data[outBase+2u] = rotated.tanX.z;
+	outBuf.data[outBase+3u] = rotated.tanY.x; outBuf.data[outBase+4u] = rotated.tanY.y;
+	outBuf.data[outBase+5u] = rotated.tanY.z;
+	outBuf.data[outBase+6u] = rotated.nor.x; outBuf.data[outBase+7u] = rotated.nor.y;
+	outBuf.data[outBase+8u] = rotated.nor.z;
+}
