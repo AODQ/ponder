@@ -19,6 +19,11 @@
 
 namespace test {
 
+// set by main.cpp when vkof-test is launched with --furnace; gates the
+// opt-in full assets/Models furnace sweep in test-furnace-model-render.cpp
+// (159 models is far too slow for the default suite run)
+extern bool furnaceSweepEnabled;
+
 // dispatch a compute render node and return immediately
 template <typename Push>
 inline void dispatch(
@@ -29,6 +34,12 @@ inline void dispatch(
 	u32 groupZ = 1u,
 	srat::slice<u8 const> rootPushconstant = srat::slice<u8 const>(nullptr, 0)
 ) {
+	// probe_message is no longer auto-cleared by render_graph_execute (see
+	// vkof.hpp), so an earlier, already-handled test case's leftover
+	// message would otherwise leak into this dispatch's probe_message_count
+	// check; reset here gives every dispatch() call the same clean-slate
+	// window the old auto-clear implicitly provided
+	vkof::probe_reset();
 	vkof::RenderNode node = vkof::render_node_create(
 		{ .queue = vkof::CommandQueue::compute }
 	);

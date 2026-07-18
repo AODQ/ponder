@@ -42,15 +42,16 @@ add_executable(
 	src/test-fuzz-eval.cpp
 	src/test-transmission.cpp
 	src/test-transmission-sampling.cpp
-	src/test-cornell.cpp
-	src/test-cornell-glass.cpp
 	src/test-mixture-lobe-selection.cpp
 	src/test-dispatch-readback-race.cpp
-	src/test-raycast-primitives.cpp
 	src/test-shading-single-bounce.cpp
 	src/test-thinfilm.cpp
 	src/test-vkof-validation.cpp
 	src/test-furnace-model-render.cpp
+	src/test-environment-sampling.cpp
+	src/test-vdb-sampling.cpp
+	src/test-vdb-phase.cpp
+	src/test-stage.cpp
 )
 
 # Bake absolute paths into the binary
@@ -79,6 +80,8 @@ target_compile_definitions(
 	RAYCAST_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	THINFILM_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	FURNACE_MODEL_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
+	ENVIRONMENT_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
+	VDB_PHASE_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib"
 	REPO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
@@ -95,6 +98,7 @@ target_include_directories(
 	vkof-test
 	SYSTEM PRIVATE
 	${stb_SOURCE_DIR}
+	${tinyexr_SOURCE_DIR}
 )
 
 target_link_libraries(
@@ -109,6 +113,7 @@ target_link_libraries(
 	glfw
 	GPUOpen::VulkanMemoryAllocator
 	doctest::doctest
+	stage
 )
 
 target_link_options(

@@ -28,26 +28,83 @@
 
 // per-frame values that change too often (or are too large) for the 128-byte
 // root pushconstant; lives in a host-writable buffer referenced by
-// GpuGlobalPC.debug
-struct GpuDebugPC {
+// GpuGlobalPC.extended
+struct GpuGlobalExtended {
 	f32 envIntensity;
 	u32 renderWidth;
 	u32 renderHeight;
-	// 0=furnace, 1=checkerboard, 2=black (ENV_MODE_* in environment.glsl)
+
+	// matches ENV_MODE_* in environment.glsl
 	i32 envMode;
+
 	// subpixel jitter on the primary camera ray (antialiasing); off traces
 	// every sample through the exact pixel center
 	u32 antialias;
+
+	// VIEW(0) / CLEAR(1) / PATHTRACE(2) -- see app/viewer/main.cpp's
+	// FrameMode
+	i32 frameMode;
+
 	// single u32 atomic counter, zeroed by the cpu every frame; caps
 	// util-nan-probe.glsl's debugPrintfEXT firings to
 	// NAN_PROBE_LIMIT_PER_FRAME (see resolve.comp's nanProbeInit call)
 	u64 nanProbeCounterVa;
+
 	// material inspector: pixel coordinate to probe this frame, set by the
 	// cpu on right-click. (-1,-1) means no probe requested. resolve.comp
-	// debugPrintfEXT's the hit's material index when gl_GlobalInvocationID
-	// matches, which the cpu parses back out of vkof::probe_message next
-	// frame; one-shot (the cpu resets this to (-1,-1) right after upload)
+	// writes the hit's modelDrawIndex/materialIndex into probeResult (a
+	// plain host-readable buffer, not debug_printf -- doesn't need
+	// validation layers enabled) when gl_GlobalInvocationID matches;
+	// one-shot (the cpu resets this to (-1,-1) right after upload)
 	i32v2 probePixel;
+	// see probePixel above; the cpu resets both fields to -1 before
+	// uploading a probe request, so it can tell a genuine hit from a stale
+	// leftover value if the probed ray misses everything
+	VA(GpuProbeResult) probeResult;
+
+	// environment map, util-environment-map.glsl
+	VA(EnvironmentMapHandles) envMap;
+	// radians
+	f32 envRotation;
+	// next-event estimation toward the env map, mis-combined with the
+	// existing bsdf-sampled technique; no-op (0) for every env mode other
+	// than hdrmap regardless of this flag
+	u32 envNeeEnabled;
+
+	// caps a sample's luminance before it's written out (resolve.comp), so
+	// the rare, very high-variance paths ordinary nee/mis can't reach --
+	// e.g. a diffuse bounce that happens to hit a specular/glass object
+	// which then refracts to a bright light, a caustic path nee can't
+	// shortcut since it only helps at the vertex it's evaluated from --
+	// don't blow out the image as fireflies. trades a small amount of
+	// energy/bias for lower variance. <= 0 disables clamping entirely
+	f32 fireflyClampLuminance;
+
+	// scales the environment radiance a primary-ray miss writes to the
+	// framebuffer (the visible backdrop, resolve.comp) -- indirect bounces
+	// still see the full envIntensity, so this dims or brightens what the
+	// camera sees without changing the lighting
+	f32 envBackgroundIntensity;
+
+	// vdb buffer
+	VA(VdbHandle) vdb;
+	// maps a world-space position/direction into the space the grid's own
+	// world-to-index transform expects -- identity when the bound vdb has
+	// no instance transform of its own (e.g. file view, or a stage vdb
+	// instance left at the default transform). see stage::Transform /
+	// stage::transform_to_inverse_m44; only the first active vdb instance
+	// gets one, matching the single vdb slot above
+	f32m44 vdbWorldToLocal;
+
+	// TODO below should be per vdb-blob
+	f32 vdbSigmaScale;
+	f32 vdbDropletDiameter;
+	f32v3 vdbAlbedo;
+
+	f32 fogThickness;
+	f32v3 fogAlbedo;
+	// fog's extent (world units); caps nee/free-flight distance
+	f32 fogDistanceMax;
 };
 
 // root pushconstant, shared by every node in the frame's render graph;
@@ -59,18 +116,29 @@ struct GpuGlobalPC {
 	f32 exposure;
 	f32 pad0;
 	f32m44 viewProj;
-	VA(GpuDebugPC) debug;
+	VA(GpuGlobalExtended) extended;
 	VA(GpuResolveModelIndirectBuffer) models;
 	u64 pad1;
 	u64 pad2;
 	u64 pad3;
 };
 
+// what the material-inspector probe writes into (see
+// GpuGlobalExtended.probeResult): plain host-readable buffer, not
+// debug_printf, so it doesn't need validation layers enabled
+struct GpuProbeResult {
+	i32 modelDrawIndex;
+	i32 materialIndex;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(GpuGlobalPC) == 128, "GpuGlobalPC must be 128 bytes");
 #else
-layout(buffer_reference, scalar) buffer GpuDebugPCBuffer {
-	GpuDebugPC data;
+layout(buffer_reference, scalar) buffer GpuGlobalExtendedBuffer {
+	GpuGlobalExtended data;
+};
+layout(buffer_reference, scalar) buffer GpuProbeResultBuffer {
+	GpuProbeResult data;
 };
 #endif
 

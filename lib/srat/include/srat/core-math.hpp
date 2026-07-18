@@ -821,6 +821,60 @@ inline f32v4x8 f32v4x8_normalize(f32v4x8 const & v) {
 }
 
 // -----------------------------------------------------------------------------
+// -- f32quat
+// -----------------------------------------------------------------------------
+
+struct f32quat {
+	f32 x {0.0f}, y {0.0f}, z {0.0f}, w {1.0f};
+};
+
+inline f32quat f32quat_identity() { return { 0.0f, 0.0f, 0.0f, 1.0f }; }
+
+inline f32quat f32quat_normalize(f32quat const q) {
+	f32 const lengthSq = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+	SRAT_ASSERT(lengthSq > 0.0f);
+	f32 const invLength = 1.0f / sqrtf(lengthSq);
+	return {
+		q.x*invLength, q.y*invLength, q.z*invLength, q.w*invLength
+	};
+}
+
+inline f32quat f32quat_from_axis_angle(
+	f32v3 const & axis, f32 const angleRadians
+) {
+	f32 const half = angleRadians * 0.5f;
+	f32 const s = sinf(half);
+	return f32quat_normalize({ axis.x*s, axis.y*s, axis.z*s, cosf(half) });
+}
+
+// hamilton product; a*b applies b's rotation first, then a's -- matches the
+// f32m44 operator* convention (a*b*v applies b to v first)
+inline f32quat f32quat_mul(f32quat const & a, f32quat const & b) {
+	return {
+		a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+		a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+		a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+		a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+	};
+}
+
+// degrees, xyz composed as rotate_z * rotate_y * rotate_x (same order as the
+// f32m44_rotate_x/y/z chain used for model transforms elsewhere)
+inline f32quat f32quat_from_euler_xyz_degrees(f32v3 const & degrees) {
+	f32 const toRad = 3.14159265358979323846f / 180.0f;
+	f32quat const qx = (
+		f32quat_from_axis_angle({1.0f, 0.0f, 0.0f}, degrees.x * toRad)
+	);
+	f32quat const qy = (
+		f32quat_from_axis_angle({0.0f, 1.0f, 0.0f}, degrees.y * toRad)
+	);
+	f32quat const qz = (
+		f32quat_from_axis_angle({0.0f, 0.0f, 1.0f}, degrees.z * toRad)
+	);
+	return f32quat_mul(qz, f32quat_mul(qy, qx));
+}
+
+// -----------------------------------------------------------------------------
 // -- f32m44
 // -----------------------------------------------------------------------------
 
@@ -912,6 +966,93 @@ inline f32m44 f32m44_rotate_y(f32 const angleRadians) {
 		0.0f, 0.0f, 0.0f, 1.0f,
 	};
 };
+
+inline f32m44 f32m44_rotate_quat(f32quat const q) {
+	f32 const xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
+	f32 const xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
+	f32 const wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+	return {
+		1.0f-2.0f*(yy+zz), 2.0f*(xy+wz),      2.0f*(xz-wy),      0.0f,
+		2.0f*(xy-wz),      1.0f-2.0f*(xx+zz), 2.0f*(yz+wx),      0.0f,
+		2.0f*(xz+wy),      2.0f*(yz-wx),      1.0f-2.0f*(xx+yy), 0.0f,
+		0.0f,              0.0f,              0.0f,              1.0f,
+	};
+};
+
+inline f32m44 f32m44_compose(
+	f32v3 const position, f32quat const rotation, f32v3 const scale
+) {
+	return (
+		f32m44_translate(position.x, position.y, position.z)
+		* f32m44_rotate_quat(rotation)
+		* f32m44_scale(scale.x, scale.y, scale.z)
+	);
+}
+
+// m must be a pure rotation (unit-length, orthogonal basis columns) --
+// scale must already be divided out. shepperd's method, numerically stable
+inline f32quat f32m44_to_quat_unscaled(f32m44 const & m) {
+	f32 const m00 = m.m[0], m10 = m.m[1], m20 = m.m[2];
+	f32 const m01 = m.m[4], m11 = m.m[5], m21 = m.m[6];
+	f32 const m02 = m.m[8], m12 = m.m[9], m22 = m.m[10];
+	f32 const trace = m00 + m11 + m22;
+	f32quat q {};
+	if (trace > 0.0f) {
+		f32 const s = sqrtf(trace + 1.0f) * 2.0f;
+		q = { (m21-m12)/s, (m02-m20)/s, (m10-m01)/s, 0.25f*s };
+	} else if (m00 > m11 && m00 > m22) {
+		f32 const s = sqrtf(1.0f + m00 - m11 - m22) * 2.0f;
+		q = { 0.25f*s, (m01+m10)/s, (m02+m20)/s, (m21-m12)/s };
+	} else if (m11 > m22) {
+		f32 const s = sqrtf(1.0f + m11 - m00 - m22) * 2.0f;
+		q = { (m01+m10)/s, 0.25f*s, (m12+m21)/s, (m02-m20)/s };
+	} else {
+		f32 const s = sqrtf(1.0f + m22 - m00 - m11) * 2.0f;
+		q = { (m02+m20)/s, (m12+m21)/s, 0.25f*s, (m10-m01)/s };
+	}
+	return f32quat_normalize(q);
+}
+
+// exact inverse of f32m44_compose
+inline void f32m44_decompose(
+	f32m44 const & m,
+	f32v3 & outPosition,
+	f32quat & outRotation,
+	f32v3 & outScale
+) {
+	outPosition = { m.m[12], m.m[13], m.m[14] };
+	f32v3 const col0 { m.m[0], m.m[1], m.m[2] };
+	f32v3 const col1 { m.m[4], m.m[5], m.m[6] };
+	f32v3 const col2 { m.m[8], m.m[9], m.m[10] };
+	outScale = {
+		sqrtf(f32v3_dot(col0, col0)),
+		sqrtf(f32v3_dot(col1, col1)),
+		sqrtf(f32v3_dot(col2, col2)),
+	};
+	f32m44 rot = f32m44_identity();
+	rot.m[0] = col0.x/outScale.x; rot.m[1] = col0.y/outScale.x;
+	rot.m[2] = col0.z/outScale.x;
+	rot.m[4] = col1.x/outScale.y; rot.m[5] = col1.y/outScale.y;
+	rot.m[6] = col1.z/outScale.y;
+	rot.m[8] = col2.x/outScale.z; rot.m[9] = col2.y/outScale.z;
+	rot.m[10] = col2.z/outScale.z;
+	outRotation = f32m44_to_quat_unscaled(rot);
+}
+
+// inverse of f32quat_from_euler_xyz_degrees -- valid for the same rotate_z *
+// rotate_y * rotate_x composition order; gimbal-locks at +/-90 degrees pitch
+// like any xyz euler decomposition does. for display in an editor widget
+// only -- nothing in the render pipeline should round-trip through this
+inline f32v3 f32quat_to_euler_xyz_degrees(f32quat const q) {
+	f32m44 const m = f32m44_rotate_quat(q);
+	f32 const toDeg = 180.0f / 3.14159265358979323846f;
+	f32 const sy = m.m[2] < -1.0f ? -1.0f : (m.m[2] > 1.0f ? 1.0f : m.m[2]);
+	return {
+		atan2f(m.m[6], m.m[10]) * toDeg,
+		asinf(sy) * toDeg,
+		atan2f(-m.m[1], m.m[0]) * toDeg,
+	};
+}
 
 inline f32m44 f32m44_perspective(
 	f32 const fovY, f32 const aspect, f32 const zNear, f32 const zFar

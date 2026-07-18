@@ -34,6 +34,12 @@ vec3 openPbrFresnelMetallicEvaluateF(
 	const vec3 wi,
 	const vec3 wo
 ) {
+	// caller mixes this in by mat.baseMetalness; skip the fresnel/ggx/
+	// energy-compensation work entirely when it's going to be discarded
+	if (mat.baseMetalness <= 0.0f) {
+		return vec3(0.0f);
+	}
+
 	const vec3 nor = frame.nor;
 	const float dotNorWi = max(dot(nor, wi), 1e-5f);
 

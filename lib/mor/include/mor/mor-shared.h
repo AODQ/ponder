@@ -67,6 +67,12 @@ struct GpuMorMaterialComponent3 {
 	u32 uvTransform;
 };
 
+// GpuMorMaterialComponent1.swizzle: bits 0..1 select the sampled texture
+// channel; the invert bit flips the resolved value to 1 - x (after the
+// factor multiply), used for gltf spec-gloss glossiness -> roughness
+#define MOR_MATERIAL_SWIZZLE_CHANNEL_MASK 3
+#define MOR_MATERIAL_SWIZZLE_INVERT 4
+
 struct GpuMorMaterialComponent1 {
 	f32 r;
 	u32 texture;

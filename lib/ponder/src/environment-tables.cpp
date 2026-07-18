@@ -1,6 +1,6 @@
 #include <ponder/environment-tables.hpp>
 
-#include <stb_image.h>
+#include <tinyexr.h>
 
 // -----------------------------------------------------------------------------
 // -- private api
@@ -47,7 +47,7 @@ void compute_marginal_cdf(
 			cdf[x + 1] = cdf[x] + importance[y * width + x];
 		}
 		f32 const rowSum = cdf[width];
-		rowIntegral[y] = rowSum / width;
+		rowIntegral[y] = rowSum;
 		if (rowSum > 0.0f) {
 			for (i32 x = 1; x <= width; ++x) {
 				cdf[x] /= rowSum;
@@ -107,14 +107,19 @@ void compute_pdf(
 ponder::EnvironmentTables ponder::environment_tables_create(
 	const std::string & path
 ) {
-	int32_t width;
-	int32_t height;
-	int32_t channels;
-	f32 const * const pixels = (
-		stbi_loadf(path.c_str(), &width, &height, &channels, 4)
-	);
-	if (!width || !height) {
-		printf("WARNING: failed to load environment map '%s'\n", path.c_str());
+	float * pixels = nullptr;
+	int32_t width = 0;
+	int32_t height = 0;
+	char const * err = nullptr;
+	int32_t const ret = LoadEXR(&pixels, &width, &height, path.c_str(), &err);
+	if (ret != TINYEXR_SUCCESS) {
+		printf(
+			"WARNING: failed to load environment map '%s': %s\n",
+			path.c_str(), err ? err : "unknown error"
+		);
+		if (err) {
+			FreeEXRErrorMessage(err);
+		}
 		return {};
 	}
 
@@ -259,6 +264,7 @@ ponder::EnvironmentTables ponder::environment_tables_create(
 			.sampler = tables.tableSampler,
 		})
 	);
+	free(pixels);
 	return tables;
 }
 

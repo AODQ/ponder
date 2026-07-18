@@ -11,6 +11,10 @@ struct GpuNanCheckPC {
 	u32 inputHandle;
 	u32 width;
 	u32 height;
+	// pixel offset of this dispatch within the render target; (0, 0) with a
+	// full-screen invocation count for an untiled dispatch
+	u32 tileOriginX;
+	u32 tileOriginY;
 	u32 pad0;
 };
 

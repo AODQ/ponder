@@ -1,0 +1,84 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_debug_printf : enable
+
+// expected side of the fog phase function chi-square: one thread per bin,
+// numerically integrates utilVdbPhaseFog (the real production mixture eval)
+// over the bin's solid angle around pc.wi. same quadrature convention as
+// mixture_expected.comp.
+
+#define PI 3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-vdb.glsl"
+#include "util-sampling-bins.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t expectedVa;
+	uint sampleCount;
+	uint seedSalt;
+	f32v3 wi;
+	f32 anisotropyHG;
+	f32 anisotropyDraine;
+	f32 draineAlpha;
+	f32 draineWeight;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint bin = gl_GlobalInvocationID.x;
+	if (bin >= BSDF_VERIFY_BIN_COUNT) {
+		return;
+	}
+
+	UtilVdbPhaseParams params;
+	params.anisotropyHG = pc.anisotropyHG;
+	params.anisotropyDraine = pc.anisotropyDraine;
+	params.draineAlpha = pc.draineAlpha;
+	params.draineWeight = pc.draineWeight;
+
+	const uint thetaBin = bin / BSDF_VERIFY_PHI_BINS;
+	const uint phiBin = bin % BSDF_VERIFY_PHI_BINS;
+	const f32 theta0 = PI * f32(thetaBin) / f32(BSDF_VERIFY_THETA_BINS);
+	const f32 theta1 = PI * f32(thetaBin + 1u) / f32(BSDF_VERIFY_THETA_BINS);
+	const f32 phi0 = TAU * f32(phiBin) / f32(BSDF_VERIFY_PHI_BINS);
+	const f32 phi1 = TAU * f32(phiBin + 1u) / f32(BSDF_VERIFY_PHI_BINS);
+
+	// same 32x32 midpoint quadrature as mixture_expected.comp
+	const uint subGrid = 32u;
+	f32 integral = 0.0f;
+	for (uint j = 0u; j < subGrid; ++j) {
+		const f32 theta = mix(theta0, theta1, (f32(j) + 0.5f) / f32(subGrid));
+		const f32 sinTheta = sin(theta);
+		for (uint k = 0u; k < subGrid; ++k) {
+			const f32 phi = mix(phi0, phi1, (f32(k) + 0.5f) / f32(subGrid));
+			const f32v3 dir = bsdfVerifyDirectionFromAngles(pc.wi, theta, phi);
+			const f32 phaseVal = utilVdbPhaseFog(dot(pc.wi, dir), params);
+			integral += phaseVal * sinTheta;
+		}
+	}
+	integral *= (
+		(theta1 - theta0) * (phi1 - phi0)
+		/ f32(subGrid * subGrid)
+	);
+
+	const f32 scaled = integral * f32(pc.sampleCount);
+
+	if (bin == 0u) {
+		debugPrintfEXT(
+			"vdb_phase_expected bin0 write integral=%f scaled=%f",
+			integral, scaled
+		);
+	}
+
+	F32Buffer(pc.expectedVa).data[bin] = scaled;
+}

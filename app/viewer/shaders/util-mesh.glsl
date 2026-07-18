@@ -140,7 +140,9 @@ UtilMeshAttributeData utilMeshDecodeAttributes(
 	const f32v4 ndc1 = pc.global.viewProj * modelTransform * f32v4(pos1, 1.0);
 	const f32v4 ndc2 = pc.global.viewProj * modelTransform * f32v4(pos2, 1.0);
 
-	const GpuDebugPC unf = GpuDebugPCBuffer(pc.global.debug).data;
+	const GpuGlobalExtended unf = (
+		GpuGlobalExtendedBuffer(pc.global.extended).data
+	);
 	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
 	const f32v2 clip0 = utilNdcToClip(ndc0, screensize);
 	const f32v2 clip1 = utilNdcToClip(ndc1, screensize);
@@ -279,6 +281,8 @@ struct UtilMeshAttributeDataFromIndices {
 	GpuMorUvTransformBuffer uvTransforms;
 	f32v3 origin;
 	f32v2 uv;
+	f32v2 uvDx;
+	f32v2 uvDy;
 	f32v3 normal;
 	f32v3 normalGeometrical;
 	f32v4 tangent;
@@ -287,7 +291,8 @@ struct UtilMeshAttributeDataFromIndices {
 UtilMeshAttributeDataFromIndices utilMeshAttributeDataFromIndices(
 	const uint modelDrawIndex,
 	const uint primitiveIndex,
-	const vec2 barycentric
+	const vec2 barycentric,
+	const bool unpackUvDerivatives
 ) {
 	GpuResolveModelIndirectBuffer modelsBuf = (
 		GpuResolveModelIndirectBuffer(pc.global.models)
@@ -331,6 +336,38 @@ UtilMeshAttributeDataFromIndices utilMeshAttributeDataFromIndices(
 		+ attr1.uv * barycentric.x
 		+ attr2.uv * barycentric.y
 	);
+	retAttrData.uvDx = f32v2(0.0f);
+	retAttrData.uvDy = f32v2(0.0f);
+	// unpack uv derivatives TODO - ray differential? not sure
+	// if (unpackUvDerivatives) {
+	// 	// analytical barycentric derivatives
+	// 	const f32 duDx = (clip1.y - clip2.y) / barycentricDenom;
+	// 	const f32 dvDx = (clip2.y - clip0.y) / barycentricDenom;
+	// 	const f32 dwDx = (clip0.y - clip1.y) / barycentricDenom;
+	// 	const f32 duDy = (clip2.x - clip1.x) / barycentricDenom;
+	// 	const f32 dvDy = (clip0.x - clip2.x) / barycentricDenom;
+	// 	const f32 dwDy = (clip1.x - clip0.x) / barycentricDenom;
+
+	// 	const f32 perspDenomDx = duDx*invW0 + dvDx*invW1 + dwDx*invW2;
+	// 	const f32 perspDenomDy = duDy*invW0 + dvDy*invW1 + dwDy*invW2;
+	// 	const f32v2 uvNumerDx = (
+	// 		  attr0.uv*duDx*invW0
+	// 		+ attr1.uv*dvDx*invW1
+	// 		+ attr2.uv*dwDx*invW2
+	// 	);
+	// 	const f32v2 uvNumerDy = (
+	// 		  attr0.uv*duDy*invW0
+	// 		+ attr1.uv*dvDy*invW1
+	// 		+ attr2.uv*dwDy*invW2
+	// 	);
+	// 	retAttrData.uvDx = (
+	// 		(uvNumerDx - retAttrData.uv*perspDenomDx) / perspectiveDenom
+	// 	);
+	// 	retAttrData.uvDy = (
+	// 		(uvNumerDy - retAttrData.uv*perspDenomDy) / perspectiveDenom
+	// 	);
+	// }
+
 	const f32v3 localNormal = (
 		attr0.normal * (1.0 - barycentric.x - barycentric.y)
 		+ attr1.normal * barycentric.x
@@ -346,12 +383,28 @@ UtilMeshAttributeDataFromIndices utilMeshAttributeDataFromIndices(
 	// baked into the blas), so bring them into world space to match the rays
 	const mat3 modelRot = mat3(model.modelMatrix);
 	const mat3 normalMat = transpose(inverse(modelRot));
-	retAttrData.normal = normalize(normalMat * localNormal);
+	// interpolated attributes can be length zero in real assets (meshes
+	// with no NORMAL attribute load as all-zero normals; antiparallel
+	// corner normals/tangents interpolate through zero; some assets ship
+	// zero tangents outright). normalize() of those is NaN, and a NaN
+	// slips through every downstream `len < eps` degeneracy guard since
+	// NaN comparisons are false -- so keep degenerate attributes at zero
+	// here, which the frame construction handles (geometric-normal /
+	// frisvad fallbacks)
+	const f32v3 worldNormal = normalMat * localNormal;
+	retAttrData.normal = (
+		dot(worldNormal, worldNormal) > 1e-12f
+		? normalize(worldNormal)
+		: f32v3(0.0f)
+	);
 	retAttrData.normalGeometrical = (
 		normalize(normalMat * cross(pos1 - pos0, pos2 - pos0))
 	);
+	const f32v3 worldTangent = modelRot * localTangent.xyz;
 	retAttrData.tangent = f32v4(
-		normalize(modelRot * localTangent.xyz),
+		dot(worldTangent, worldTangent) > 1e-12f
+		? normalize(worldTangent)
+		: f32v3(0.0f),
 		localTangent.w
 	);
 	return retAttrData;

@@ -73,6 +73,12 @@ vec3 openPbrFuzzEvaluateF(
 	const vec3 wi,
 	const vec3 wo
 ) {
+	// return value reduces to exactly coatedBase at fuzzWeight == 0 (see the
+	// mix at the bottom); skip the LUT fetch + LTC transform for it
+	if (mat.fuzzWeight <= 0.0f) {
+		return coatedBase;
+	}
+
 	// sheen approximated as an LTC-transformed cosine fitted to a
 	// homogeneous volumetric layer with a fiber-like SGGX microflake phase
 	// function. TODO fill the eq placeholders from the paper copies

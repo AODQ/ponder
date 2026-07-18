@@ -24,6 +24,10 @@ namespace vkof
 		r32_float,
 		r32g32b32a32_sfloat,
 		d24_unorm_s8_uint,
+		// block-compressed; sample-only (no attachment/storage usage, no
+		// mipmap generation)
+		bc7_unorm,
+		bc7_srgb,
 	};
 
 	struct Pipeline { u64 id; };
@@ -178,6 +182,9 @@ namespace vkof
 		u32 depth { 1u };
 		ImageFormat format;
 		u32 mipLevels;
+		// uncompressed formats: mip 0 only, remaining mips come from
+		// image_generate_mipmaps. block-compressed formats: the full mip
+		// chain, tightly packed mip-major (the dds payload layout)
 		srat::slice<u8 const> optInitialData;
 	};
 
@@ -453,6 +460,13 @@ namespace vkof
 		TransientImage debugDrawDepth { 0 };
 	};
 	void render_graph_execute(RenderGraphExecuteInfo const & executeInfo);
+
+	// GPU time of the nodeIndex'th node in RenderGraphExecuteInfo::nodes
+	// declared order, from the most recent timestamp readback (the frame
+	// that last used this frame slot, i.e. kFramesInFlight frames ago).
+	// returns 0.0 when timestamps are unsupported, no readback has
+	// happened yet, or nodeIndex wasn't profiled
+	double node_gpu_ms(u32 nodeIndex);
 }
 
 // -----------------------------------------------------------------------------
@@ -482,19 +496,31 @@ namespace vkof
 	// render_graph_execute renders and presents the UI automatically.
 	void imgui_begin();
 
-	// Save a transient image to a PNG file. Blocks until the GPU is idle.
-	void screenshot(TransientImage const & image, char const * const path);
+	// Save an image to an EXR file, scaling rgb by rgbScale first (a plain
+	// linear gain -- e.g. the caller's display exposure -- applied before
+	// write so the file keeps whatever headroom above 1.0 the source had).
+	// Blocks until the GPU is idle.
+	void screenshot(
+		Image const & image, char const * const path, f32 const rgbScale = 1.0f
+	);
 
-	// number of debugPrintfEXT messages captured this frame (see
-	// shaders/util-nan-probe.glsl and mixture_expected.comp for emitters).
+	// number of debugPrintfEXT messages captured since the last
+	// probe_reset() call (or since startup, if never called) -- see
+	// shaders/util-nan-probe.glsl and mixture_expected.comp for emitters.
 	// also echoed to stderr as they arrive, so a headless run's terminal
-	// gets them without polling this. cleared at the start of each
-	// render_graph_execute.
+	// gets them without polling this. NOT auto-cleared by
+	// render_graph_execute: the validation layer's debug-printf readback
+	// isn't guaranteed to land synchronously within the render_graph_execute
+	// call whose fence covers it, so an auto-clear-every-call design loses
+	// messages to that race. call probe_reset() once you've consumed them.
 	[[nodiscard]] u32 probe_message_count();
 
 	// the debug printf message at `index` (0 <= index < probe_message_count()).
-	// pointer is stable until the next render_graph_execute call.
+	// pointer is stable until the next probe_reset() call.
 	[[nodiscard]] char const * probe_message(u32 index);
+
+	// clears the captured debug-printf probe log.
+	void probe_reset();
 
 	// returns true if any pipeline was successfully hot-reloaded this frame.
 	// cleared at the start of each render_graph_execute.

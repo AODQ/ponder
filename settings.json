@@ -1,6 +1,12 @@
 {
 	"modelPaths": [
-		"../cull/assets/Models",
+		"assets/Models/",
 		"/home/toad/Downloads/models/"
+	],
+	"environmentMapPaths": [
+		"assets/environments/"
+	],
+	"vdbPaths": [
+		"assets/vdb/"
 	]
 }

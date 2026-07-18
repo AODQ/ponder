@@ -89,11 +89,14 @@ OpenPbrMaterial openPbrLoadMaterialDeriv(
 			matOut. name .r = (\
 				mat. name .r \
 				* fnSampleTextureWithDeriv(mat. name .texture, xfUv, xfUvDx, xfUvDy)[ \
-					mat. name .swizzle \
+					mat. name .swizzle & MOR_MATERIAL_SWIZZLE_CHANNEL_MASK \
 				] \
 			); \
 		} else { \
 			matOut. name .r = mat. name .r; \
+		} \
+		if ((mat. name .swizzle & MOR_MATERIAL_SWIZZLE_INVERT) != 0) { \
+			matOut. name .r = 1.0f - matOut. name .r; \
 		}
 	MOR_MATERIAL_ALL_PARAMS_1(LOAD_COMPONENT1)
 	#undef LOAD_COMPONENT1
@@ -177,11 +180,14 @@ OpenPbrMaterial openPbrLoadMaterialLod(
 			matOut. name .r = (\
 				mat. name .r \
 				* fnSampleTextureWithLod(mat. name .texture, xfUv, lod)[ \
-					mat. name .swizzle \
+					mat. name .swizzle & MOR_MATERIAL_SWIZZLE_CHANNEL_MASK \
 				] \
 			); \
 		} else { \
 			matOut. name .r = mat. name .r; \
+		} \
+		if ((mat. name .swizzle & MOR_MATERIAL_SWIZZLE_INVERT) != 0) { \
+			matOut. name .r = 1.0f - matOut. name .r; \
 		}
 	MOR_MATERIAL_ALL_PARAMS_1(LOAD_COMPONENT1)
 	#undef LOAD_COMPONENT1

@@ -46,7 +46,7 @@ include(FetchContent)
 FetchContent_Declare(
 	vk-bootstrap
 	GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
-	GIT_TAG		main
+	GIT_TAG		v1.4.350
 	GIT_SHALLOW	TRUE
 )
 
@@ -96,6 +96,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cgltf)
 
+# system openvdb; its find module hard-requires boost headers that the
+# library itself doesn't need at consume time, so link it directly
+add_library(openvdb-system SHARED IMPORTED)
+set_target_properties(
+	openvdb-system
+	PROPERTIES
+	IMPORTED_LOCATION /usr/lib/libopenvdb.so
+	# openvdb headers inline references into these (imath's half<->float
+	# table, tbb templates), so consumers must link them explicitly
+	INTERFACE_LINK_LIBRARIES "/usr/lib/libImath.so;/usr/lib/libtbb.so"
+)
+
 FetchContent_Declare(
 	meshoptimizer
 	GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
@@ -111,6 +123,17 @@ FetchContent_Declare(
 	GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(stb)
+
+FetchContent_Declare(
+	tinyexr
+	GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+	GIT_TAG        release
+	GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(tinyexr)
+if(NOT tinyexr_POPULATED)
+	FetchContent_Populate(tinyexr)
+endif()
 
 FetchContent_Declare(
 	rapidjson
@@ -229,6 +252,9 @@ target_include_directories(
 	PRIVATE
 	${vma_SOURCE_DIR}/include
 	${stb_SOURCE_DIR}
+	${tinyexr_SOURCE_DIR}
+	# vkof.cpp/aftermath.cpp #include "aftermath.hpp" unqualified
+	lib/vkof/include/vkof
 )
 
 target_precompile_headers(
@@ -284,10 +310,13 @@ target_link_libraries(
 add_library(
 	ponder
 	STATIC
+	lib/ponder/src/vdb.cpp
 	lib/ponder/src/bluenoise.cpp
 	lib/ponder/src/energy-tables.cpp
 	lib/ponder/src/zeltner-tables.cpp
-	lib/ponder/src/stb_image_impl.cpp
+	lib/ponder/src/stb-image-impl.cpp
+	lib/ponder/src/tinyexr-impl.cpp
+	lib/ponder/src/environment-tables.cpp
 )
 
 target_include_directories(
@@ -300,12 +329,52 @@ target_include_directories(
 	ponder
 	SYSTEM PRIVATE
 	${stb_SOURCE_DIR}
+	${tinyexr_SOURCE_DIR}
 )
 
 target_link_libraries(
 	ponder
 	PUBLIC
 	vkof
+	PRIVATE
+	ponder-flags
+	openvdb-system
+)
+
+# nanovdb is header-only; this unlocks its openvdb-conversion code paths
+target_compile_definitions(ponder PRIVATE NANOVDB_USE_OPENVDB)
+
+# ------------------------------------------------------------------------------
+# -- stage (json scene file: gltf/vdb/alembic instances, cameras, lights, env)
+# ------------------------------------------------------------------------------
+
+add_library(
+	stage
+	STATIC
+	lib/stage/src/stage.cpp
+	lib/stage/src/stage-imgui.cpp
+	${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp
+)
+
+target_include_directories(
+	stage
+	PUBLIC
+	lib/stage/include
+)
+
+target_include_directories(
+	stage
+	SYSTEM PRIVATE
+	${rapidjson_SOURCE_DIR}/include
+	${imguizmo_SOURCE_DIR}/src
+)
+
+target_link_libraries(
+	stage
+	PUBLIC
+	mor
+	ponder
+	srat
 	PRIVATE
 	ponder-flags
 )
@@ -344,6 +413,7 @@ target_link_libraries(
 	srat
 	mor
 	ponder
+	stage
 	Vulkan::Vulkan
 	vk-bootstrap::vk-bootstrap
 	glfw

@@ -1,0 +1,86 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// expected side of the environment map's sampler-vs-pdf chi-square check
+// (same technique as sampling_expected.comp, retargeted): one thread per
+// bin, numerically integrates environmentMapPdf over the bin's solid angle
+// and scales by the sample count. full-sphere distribution with no support
+// boundary anywhere (unlike the bsdf lobes' cap-cut/tir curves), so a
+// coarser subgrid than sampling_expected.comp's 32x32 is plenty.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-sampling-bins.glsl"
+#include "util-environment-map.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// seedSalt is unused here; declared so the block layout stays byte-identical
+// to environment_sampling_histogram.comp's and both dispatches can share one
+// C++ push struct (EnvSamplingPush in test-environment-sampling.cpp)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t expectedVa;
+	EnvironmentMapHandles handles;
+	uint sampleCount;
+	uint seedSalt;
+	float rotation;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint bin = gl_GlobalInvocationID.x;
+	if (bin >= BSDF_VERIFY_BIN_COUNT) {
+		return;
+	}
+	const f32v3 nor = f32v3(0.0f, 1.0f, 0.0f);
+
+	// this bin's (theta, phi) rectangle
+	const uint thetaBin = bin / BSDF_VERIFY_PHI_BINS;
+	const uint phiBin = bin % BSDF_VERIFY_PHI_BINS;
+	const f32 theta0 = PI * f32(thetaBin) / f32(BSDF_VERIFY_THETA_BINS);
+	const f32 theta1 = PI * f32(thetaBin + 1u) / f32(BSDF_VERIFY_THETA_BINS);
+	const f32 phi0 = TAU * f32(phiBin) / f32(BSDF_VERIFY_PHI_BINS);
+	const f32 phi1 = TAU * f32(phiBin + 1u) / f32(BSDF_VERIFY_PHI_BINS);
+
+	// midpoint over the subgrid; pdf(omega) * sin(theta), d_omega =
+	// sin(theta) d_theta d_phi
+	const uint subGrid = 8u;
+	f32 integral = 0.0f;
+	for (uint j = 0u; j < subGrid; ++j) {
+		const f32 theta = mix(theta0, theta1, (f32(j) + 0.5f) / f32(subGrid));
+		const f32 sinTheta = sin(theta);
+		for (uint k = 0u; k < subGrid; ++k) {
+			const f32 phi = mix(phi0, phi1, (f32(k) + 0.5f) / f32(subGrid));
+			// same frame + phi convention as the histogram
+			const f32v3 wo = (
+				bsdfVerifyDirectionFromAngles(nor, theta, phi)
+			);
+			integral += environmentMapPdf(pc.handles, wo, pc.rotation) * sinTheta;
+		}
+	}
+	integral *= (
+		(theta1 - theta0) * (phi1 - phi0) / f32(subGrid * subGrid)
+	);
+
+	F32Buffer(pc.expectedVa).data[bin] = integral * f32(pc.sampleCount);
+}

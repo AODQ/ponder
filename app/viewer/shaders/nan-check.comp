@@ -28,7 +28,10 @@ layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
 layout(local_size_x = 16, local_size_y = 16) in;
 
 void main() {
-	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 coord = (
+		ivec2(gl_GlobalInvocationID.xy)
+		+ ivec2(pc.nanCheck.tileOriginX, pc.nanCheck.tileOriginY)
+	);
 	if (coord.x >= int(pc.nanCheck.width) || coord.y >= int(pc.nanCheck.height)) {
 		return;
 	}

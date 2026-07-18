@@ -1,14 +1,25 @@
 // environment background sampling; dir is y-up world space
 
+#include "util-environment-map.glsl"
+#include "util-mis.glsl"
+
 #define ENV_MODE_FURNACE 0
 #define ENV_MODE_CHECKERBOARD 1
 #define ENV_MODE_BLACK 2
+#define ENV_MODE_HDRMAP 3
 
 vec3 sampleEnvironment(
 	const vec3 dir,
 	const float envIntensity,
-	const int envMode
+	const int envMode,
+	const EnvironmentMapHandles envHandles,
+	const float envRotation
 ) {
+	if (envMode == ENV_MODE_HDRMAP) {
+		return (
+			environmentMapRadiance(envHandles, dir, envRotation) * envIntensity
+		);
+	}
 	if (envMode == ENV_MODE_CHECKERBOARD) {
 		const float checkerSize = 0.1f;
 		const float checker = (

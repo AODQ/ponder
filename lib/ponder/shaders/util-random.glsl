@@ -16,6 +16,9 @@
 #define u64 uint64_t
 #endif
 
+#define skPi 3.14159265358979323846
+#define skTau 6.28318530717958647692
+
 // one-shot hash, used only to seed the pcg32 streams
 u32 fnPcgHash(u32 s) {
 	s = s * 747796405u + 2891336453u;
@@ -47,6 +50,14 @@ f32v2 fnSampleUniform2(inout u64 state) {
 f32 fnSampleBluenoise(const u32v2 coord, const u32 textureHandle) {
 	const f32v2 uv = (f32v2(coord % u32v2(128)) + 0.5f) / 128.0f;
 	return texture(vkofTextures[nonuniformEXT(textureHandle)], uv).r;
+}
+
+// uniform direction on a unit sphere; pdf = 1/4*pi
+f32v3 fnSampleUniformSphere(const f32v2 u) {
+	const f32 z = 1.0 - 2.0 * u.x;
+	const f32 r = sqrt(max(0.0, 1.0 - z * z));
+	const f32 phi = skTau * u.y;
+	return f32v3(r * cos(phi), r * sin(phi), z);
 }
 
 // seeds two independent pcg32 streams; state/state2 are for further draws,

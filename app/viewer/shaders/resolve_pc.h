@@ -46,7 +46,13 @@ struct GpuResolvePC {
 	u32 bluenoiseCount;
 	u32 kullaContyEnergyHandle;
 	u32 zeltnerLtcParamHandle;
+	// pixel offset of this dispatch within the render target; (0, 0) with a
+	// full-screen invocation count for an untiled dispatch. origins are
+	// multiples of the tile size (see kPtTileSize in pt-accumulate-pc.h)
+	u32 tileOriginX;
+	u32 tileOriginY;
 	u32 pad0;
+	u32 pad1;
 };
 
 #ifndef __cplusplus

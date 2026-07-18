@@ -1,0 +1,69 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// observed side of the fog phase function's sampler-vs-eval chi-square:
+// draws pc.sampleCount directions from utilVdbPhaseSampleMixture (the real
+// production HG+Draine mixture sampler) and bins them over the full sphere
+// around pc.wi, same convention as mixture_histogram.comp -- a phase
+// function is the volumetric analog of a bsdf lobe, azimuthally symmetric
+// about the incoming direction rather than a surface normal, so pc.wi plays
+// the role mixture_histogram.comp's shading normal does.
+
+#define PI 3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-vdb.glsl"
+#include "util-sampling-bins.glsl"
+
+layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t histogramVa;
+	uint sampleCount;
+	uint seedSalt;
+	f32v3 wi;
+	f32 anisotropyHG;
+	f32 anisotropyDraine;
+	f32 draineAlpha;
+	f32 draineWeight;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint sampleIndex = gl_GlobalInvocationID.x;
+	if (sampleIndex >= pc.sampleCount) {
+		return;
+	}
+
+	UtilVdbPhaseParams params;
+	params.anisotropyHG = pc.anisotropyHG;
+	params.anisotropyDraine = pc.anisotropyDraine;
+	params.draineAlpha = pc.draineAlpha;
+	params.draineWeight = pc.draineWeight;
+
+	const u32 h0 = fnPcgHash(sampleIndex + fnPcgHash(pc.seedSalt));
+	const u32 h1 = fnPcgHash(h0);
+	u64 state = (u64(h0) << 32) | u64(h1);
+
+	const f32v3 dir = utilVdbPhaseSampleMixture(params, pc.wi, state);
+
+	const bool finite = (
+		!isnan(dir.x) && !isnan(dir.y) && !isnan(dir.z)
+		&& !isinf(dir.x) && !isinf(dir.y) && !isinf(dir.z)
+	);
+	const bool unit = finite && abs(length(dir) - 1.0f) < 1e-2f;
+	const uint bin = (
+		unit
+		? bsdfVerifyDirectionToBin(pc.wi, dir)
+		: BSDF_VERIFY_BIN_COUNT
+	);
+
+	atomicAdd(U32Buffer(pc.histogramVa).data[bin], 1u);
+}

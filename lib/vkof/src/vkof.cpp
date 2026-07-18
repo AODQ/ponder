@@ -9,16 +9,11 @@
 #include <GLFW/glfw3.h>
 #include <vk_mem_alloc.h>
 
-#include <stb_image_write.h>
+#include <tinyexr.h>
 
 #if defined(VKOF_AFTERMATH)
 #include "aftermath.hpp"
 #endif
-
-int vkof_write_png_uncompressed(
-	char const * path, int w, int h, int comp,
-	void const * data, int stride
-);
 
 #include <chrono>
 #include <cmath>
@@ -49,7 +44,8 @@ static void vkof_aftermath_on_device_lost() {}
 // -- shader probe
 // -----------------------------------------------------------------------------
 
-// every debugPrintfEXT message seen since the last render_graph_execute call
+// every debugPrintfEXT message seen since the last vkof::probe_reset() call
+// (or since startup, if never called)
 static std::vector<std::string> sProbeMessages;
 static bool sShaderReloaded = false;
 
@@ -102,6 +98,10 @@ u32 vkof::probe_message_count() {
 
 char const * vkof::probe_message(u32 const index) {
 	return sProbeMessages.at(index).c_str();
+}
+
+void vkof::probe_reset() {
+	sProbeMessages.clear();
 }
 
 bool vkof::shader_reloaded() { return sShaderReloaded; }
@@ -209,8 +209,22 @@ static VkFormat to_vk_format(vkof::ImageFormat format) {
 			return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case vkof::ImageFormat::d24_unorm_s8_uint:
 			return VK_FORMAT_D24_UNORM_S8_UINT;
+		case vkof::ImageFormat::bc7_unorm:
+			return VK_FORMAT_BC7_UNORM_BLOCK;
+		case vkof::ImageFormat::bc7_srgb:
+			return VK_FORMAT_BC7_SRGB_BLOCK;
 		default:
 			return VK_FORMAT_UNDEFINED;
+	}
+}
+
+static bool format_is_block_compressed(VkFormat const format) {
+	switch (format) {
+		case VK_FORMAT_BC7_UNORM_BLOCK:
+		case VK_FORMAT_BC7_SRGB_BLOCK:
+			return true;
+		default:
+			return false;
 	}
 }
 
@@ -278,6 +292,11 @@ namespace
 			| VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 			| VK_IMAGE_USAGE_TRANSFER_DST_BIT
 		);
+		// block-compressed formats are sample-only; attachment and storage
+		// usage are not supported for them
+		if (format_is_block_compressed(format)) {
+			return usage;
+		}
 		bool const isDepth = (
 			format_aspect(format) & VK_IMAGE_ASPECT_DEPTH_BIT
 		);
@@ -1458,27 +1477,53 @@ vkof::Image vkof::image_create(
 			1, &toTransferDst
 		);
 
-		VkBufferImageCopy const copyRegion = {
-			.bufferOffset = 0,
-			.bufferRowLength = 0,
-			.bufferImageHeight = 0,
-			.imageSubresource = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.mipLevel = 0,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-			},
-			.imageOffset = { 0, 0, 0 },
-			.imageExtent = {
-				createInfo.width,
-				createInfo.height,
-				is3d ? createInfo.depth : 1u,
-			},
-		};
+		std::vector<VkBufferImageCopy> copyRegions;
+		if (format_is_block_compressed(vkFormat)) {
+			// initial data is the full mip chain, tightly packed mip-major
+			// in 4x4 blocks of 16 bytes (the dds payload layout)
+			u64 offset = 0;
+			for (u32 mip = 0; mip < createInfo.mipLevels; ++mip) {
+				u32 const mipW = std::max(createInfo.width >> mip, 1u);
+				u32 const mipH = std::max(createInfo.height >> mip, 1u);
+				copyRegions.push_back({
+					.bufferOffset = offset,
+					.bufferRowLength = 0,
+					.bufferImageHeight = 0,
+					.imageSubresource = {
+						.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+						.mipLevel = mip,
+						.baseArrayLayer = 0,
+						.layerCount = 1,
+					},
+					.imageOffset = { 0, 0, 0 },
+					.imageExtent = { mipW, mipH, 1u },
+				});
+				offset += (u64)((mipW + 3u) / 4u) * ((mipH + 3u) / 4u) * 16u;
+			}
+			SRAT_ASSERT(offset == createInfo.optInitialData.size());
+		} else {
+			copyRegions.push_back({
+				.bufferOffset = 0,
+				.bufferRowLength = 0,
+				.bufferImageHeight = 0,
+				.imageSubresource = {
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.mipLevel = 0,
+					.baseArrayLayer = 0,
+					.layerCount = 1,
+				},
+				.imageOffset = { 0, 0, 0 },
+				.imageExtent = {
+					createInfo.width,
+					createInfo.height,
+					is3d ? createInfo.depth : 1u,
+				},
+			});
+		}
 		vkCmdCopyBufferToImage(
 			cmd, stagingBuffer, implTexture.image,
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			1, &copyRegion
+			(u32)copyRegions.size(), copyRegions.data()
 		);
 
 		VkImageMemoryBarrier const toGeneral = {
@@ -1671,6 +1716,9 @@ void vkof::image_generate_mipmaps(Image const & image)
 {
 	auto const implTexture = sDevice->imagePool.get(image);
 	if (!implTexture) { return; }
+	// block-compressed images can't be blit targets; their mips are
+	// uploaded pre-baked in image_create
+	if (format_is_block_compressed(implTexture->vkFormat)) { return; }
 	u32 const mipLevels = (u32)implTexture->imageViewPerMip.size();
 	if (mipLevels <= 1u) { return; }
 
@@ -4922,7 +4970,6 @@ static void swapchain_recreate() {
 
 void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 {
-	sProbeMessages.clear();
 	sShaderReloaded = false;
 
 	u32 const frameSlot = sDevice->frameIndex % kFramesInFlight;
@@ -5965,20 +6012,28 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 	pipeline_hot_reload();
 }
 
+double vkof::node_gpu_ms(u32 const nodeIndex)
+{
+	Profiler const & prof = sDevice->profiler;
+	if (!prof.gpuSupported || nodeIndex >= prof.displayCount) { return 0.0; }
+	return prof.timings[nodeIndex].gpuMs;
+}
+
 void vkof::screenshot(
-	vkof::TransientImage const & image,
-	char const * const path
+	vkof::Image const & image,
+	char const * const path,
+	f32 const rgbScale
 ) {
 	srat::profile_tick pt;
 	vkof::device_wait_idle();
 	pt.tick("device_wait_idle");
 
-	vkof::Image const img = vkof::transient_image_get_image(image);
 	VkImage vkImg;
 	u32 w, h;
-	if (!resolve_image(img, vkImg, w, h)) { return; }
+	if (!resolve_image(image, vkImg, w, h)) { return; }
 
-	u64 const byteCount = (u64)w * h * 4u;
+	u64 const pixelCount = (u64)w * h;
+	u64 const byteCount = pixelCount * 4u * (u64)sizeof(float);
 
 	VkBuffer stagingBuf;
 	VmaAllocation stagingAlloc;
@@ -6162,10 +6217,31 @@ void vkof::screenshot(
 	vkDestroyFence(sDevice->device, fence, nullptr);
 	vkFreeCommandBuffers(sDevice->device, pool, 1u, &cmd);
 
-	vkof_write_png_uncompressed(
-		path, (int)w, (int)h, 4, allocInfo.pMappedData, (int)(w * 4u)
+	// the accumulator's alpha channel holds the pixel's valid-sample count
+	// (see pt-accumulate.comp), not coverage -- an exported image's alpha
+	// should read as opaque, not leak that internal bookkeeping value.
+	// rgb gets the caller's linear gain (e.g. display exposure) so the file
+	// roughly matches what was on screen, without clamping away any
+	// highlight headroom the way baking in a display tonemap would
+	float * const pixels = (float *)allocInfo.pMappedData;
+	for (u64 i = 0u; i < pixelCount; ++i) {
+		pixels[i * 4u + 0u] *= rgbScale;
+		pixels[i * 4u + 1u] *= rgbScale;
+		pixels[i * 4u + 2u] *= rgbScale;
+		pixels[i * 4u + 3u] = 1.0f;
+	}
+
+	char const * exrErr = nullptr;
+	int const exrRet = SaveEXR(
+		pixels, (int)w, (int)h, 4, /*save_as_fp16=*/1, path, &exrErr
 	);
-	pt.tick("stbi_write_png");
+	if (exrRet != TINYEXR_SUCCESS) {
+		fprintf(
+			stderr, "SaveEXR failed: %s\n", exrErr ? exrErr : "unknown error"
+		);
+		if (exrErr) { FreeEXRErrorMessage(exrErr); }
+	}
+	pt.tick("SaveEXR");
 
 	vmaDestroyBuffer(sDevice->allocator, stagingBuf, stagingAlloc);
 }

@@ -1,0 +1,80 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// observed side of the environment map's sampler-vs-pdf chi-square check
+// (same technique as sampling_histogram.comp, retargeted): draws
+// pc.sampleCount directions from environmentMapImportanceSample and bins
+// them over the full sphere. unlike the bsdf-lobe sampling tests there's no
+// material/wi involved -- environmentMapImportanceSample is a pure function
+// of (handles, xi) -- so world-up stands in for the bin grid's reference
+// axis, which conveniently matches the equirect map's own polar axis.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-sampling-bins.glsl"
+#include "util-environment-map.glsl"
+
+layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t histogramVa;
+	EnvironmentMapHandles handles;
+	uint sampleCount;
+	uint seedSalt;
+	float rotation;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint sampleIndex = gl_GlobalInvocationID.x;
+	if (sampleIndex >= pc.sampleCount) {
+		return;
+	}
+
+	// same seeding convention as sampling_histogram.comp: a pure pcg chain
+	// rather than blue noise, which is anti-correlated across pixels
+	const u32 h0 = fnPcgHash(sampleIndex + fnPcgHash(pc.seedSalt));
+	const u32 h1 = fnPcgHash(h0);
+	const u32 h2 = fnPcgHash(h1);
+	const f32v2 xi = f32v2(fnUintToUniform(h1), fnUintToUniform(h2));
+
+	f32 pdf;
+	const f32v3 dir = (
+		environmentMapImportanceSample(pc.handles, xi, pc.rotation, pdf)
+	);
+
+	const bool finite = (
+		!isnan(dir.x) && !isnan(dir.y) && !isnan(dir.z)
+		&& !isinf(dir.x) && !isinf(dir.y) && !isinf(dir.z)
+		&& !isnan(pdf) && !isinf(pdf)
+	);
+	const bool unit = finite && abs(length(dir) - 1.0f) < 1e-2f;
+	const f32v3 nor = f32v3(0.0f, 1.0f, 0.0f);
+	const uint bin = (
+		unit
+		? bsdfVerifyDirectionToBin(nor, dir)
+		: BSDF_VERIFY_BIN_COUNT
+	);
+
+	atomicAdd(U32Buffer(pc.histogramVa).data[bin], 1u);
+}

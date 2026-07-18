@@ -15,9 +15,13 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <vector>
+
+#include <strings.h> // strcasecmp
 
 // ----------------------------------------------------------------------------
 // -- private types
@@ -134,6 +138,9 @@ struct ImplScene {
 	std::vector<GpuMorInstance> instances;
 
 	std::string gltfDir;
+	// only valid during scene_load; needed to resolve extension image
+	// indices (MSFT_texture_dds) that cgltf keeps as raw json
+	cgltf_data const * data { nullptr };
 	std::unordered_map<TextureKey, u32, TextureKeyHash> textureHandles;
 	std::unordered_map<TextureKey, vkof::Image, TextureKeyHash> textureImages;
 	std::unordered_map<TextureKey, SamplerKey, TextureKeyHash> textureSamplerKeys;
@@ -236,6 +243,89 @@ static u32 load_uv_transform(
 	return index;
 }
 
+// a bc7 dds file cracked open: dimensions, baked mip count and a view of
+// the tightly packed block payload
+struct DdsData
+{
+	u32 width;
+	u32 height;
+	u32 mipLevels;
+	srat::slice<u8 const> payload;
+};
+
+// parses a dx10-header dds file; only bc7 (dxgi 98/99) is accepted since
+// that is the one block format the renderer uploads natively. srgb-ness is
+// decided by the requesting material slot, not the file, so both dxgi
+// variants land in the same payload view
+static bool dds_parse(std::vector<u8> const & file, DdsData & out)
+{
+	auto const rd32 = [&](size_t const off) {
+		u32 v;
+		std::memcpy(&v, file.data() + off, 4);
+		return v;
+	};
+	constexpr size_t skHeaderSize = 148; // magic + DDS_HEADER + DDS_HEADER_DXT10
+	if (file.size() < skHeaderSize) { return false; }
+	if (std::memcmp(file.data(), "DDS ", 4) != 0) { return false; }
+	if (rd32(4) != 124) { return false; }
+	u32 const height = rd32(12);
+	u32 const width = rd32(16);
+	u32 const mipLevels = std::max(rd32(28), 1u);
+	if (std::memcmp(file.data() + 84, "DX10", 4) != 0) { return false; }
+	u32 const dxgiFormat = rd32(128);
+	if (dxgiFormat != 98 && dxgiFormat != 99) { return false; }
+
+	u64 payloadSize = 0;
+	for (u32 mip = 0; mip < mipLevels; ++mip) {
+		u32 const mipW = std::max(width >> mip, 1u);
+		u32 const mipH = std::max(height >> mip, 1u);
+		payloadSize += (u64)((mipW + 3u) / 4u) * ((mipH + 3u) / 4u) * 16u;
+	}
+	if (file.size() < skHeaderSize + payloadSize) { return false; }
+
+	out = DdsData {
+		.width = width,
+		.height = height,
+		.mipLevels = mipLevels,
+		.payload = srat::slice<u8 const>(
+			file.data() + skHeaderSize, payloadSize
+		),
+	};
+	return true;
+}
+
+// cgltf does not parse MSFT_texture_dds, so the dds image index has to be
+// fished out of the retained raw extension json ({"source": N})
+static cgltf_image const * texture_dds_image(
+	ImplScene const & s,
+	cgltf_texture const * tex
+) {
+	if (!s.data) { return nullptr; }
+	for (cgltf_size i = 0; i < tex->extensions_count; ++i) {
+		cgltf_extension const & ext = tex->extensions[i];
+		if (!ext.name || std::strcmp(ext.name, "MSFT_texture_dds") != 0) {
+			continue;
+		}
+		if (!ext.data) { return nullptr; }
+		char const * src = std::strstr(ext.data, "\"source\"");
+		if (!src) { return nullptr; }
+		src = std::strchr(src, ':');
+		if (!src) { return nullptr; }
+		long const index = std::strtol(src + 1, nullptr, 10);
+		if (index < 0 || (cgltf_size)index >= s.data->images_count) {
+			return nullptr;
+		}
+		return &s.data->images[index];
+	}
+	return nullptr;
+}
+
+static bool uri_is_dds(char const * uri) {
+	if (!uri) { return false; }
+	size_t const len = std::strlen(uri);
+	return len >= 4 && strcasecmp(uri + len - 4, ".dds") == 0;
+}
+
 static TextureRef load_texture(
 	ImplScene & s,
 	cgltf_texture_view const & texture,
@@ -251,41 +341,89 @@ static TextureRef load_texture(
 	if (it != s.textureHandles.end()) { return { it->second, uvTransform }; }
 
 	cgltf_image const * img = tex->image;
-	int w, h, channels;
-	stbi_uc * pixels = nullptr;
 
-	if (img->buffer_view) {
-		u8 const * encoded = (
-			(u8 const *)img->buffer_view->buffer->data
-			+ img->buffer_view->offset
-		);
-		int const encodedLen = (int)img->buffer_view->size;
-		pixels = stbi_load_from_memory(encoded, encodedLen, &w, &h, &channels, 4);
-	} else if (img->uri && strncmp(img->uri, "data:", 5) != 0) {
-		std::string const fullPath = (std::filesystem::path(s.gltfDir) / img->uri).string();
-		pixels = stbi_load(fullPath.c_str(), &w, &h, &channels, 4);
+	// -- dds path: an MSFT_texture_dds source, or a base image that is
+	// itself a dds; bc7 blocks upload as-is with their baked mip chain
+	vkof::Image image { 0u };
+	bool loaded = false;
+	{
+		cgltf_image const * ddsImg = texture_dds_image(s, tex);
+		if (!ddsImg && uri_is_dds(img->uri)) { ddsImg = img; }
+		if (ddsImg && ddsImg->uri && strncmp(ddsImg->uri, "data:", 5) != 0) {
+			std::string const fullPath = (
+				std::filesystem::path(s.gltfDir) / ddsImg->uri
+			).string();
+			std::ifstream file(fullPath, std::ios::binary);
+			if (file) {
+				std::vector<u8> const bytes(
+					(std::istreambuf_iterator<char>(file)),
+					std::istreambuf_iterator<char>()
+				);
+				DdsData dds;
+				if (dds_parse(bytes, dds)) {
+					image = vkof::image_create({
+						.width = dds.width,
+						.height = dds.height,
+						.format = (
+							srgb
+							? vkof::ImageFormat::bc7_srgb
+							: vkof::ImageFormat::bc7_unorm
+						),
+						.mipLevels = dds.mipLevels,
+						.optInitialData = dds.payload,
+					});
+					loaded = true;
+					img = ddsImg;
+				} else {
+					printf("mor: unsupported dds file '%s'\n", fullPath.c_str());
+				}
+			}
+		}
 	}
 
-	if (!pixels) { return { 0u, uvTransform }; }
+	if (!loaded) {
+		int w, h, channels;
+		stbi_uc * pixels = nullptr;
 
-	u32 const mipLevels = (
-		(u32)std::floor(std::log2((f32)std::max(w, h))) + 1u
-	);
-	vkof::Image const image = vkof::image_create({
-		.width = (u32)w,
-		.height = (u32)h,
-		.format = (
-			srgb
-			? vkof::ImageFormat::r8g8b8a8_srgb
-			: vkof::ImageFormat::r8g8b8a8_unorm
-		),
-		.mipLevels = mipLevels,
-		.optInitialData = srat::slice<u8 const>(
-			pixels, (u64)w * h * 4
-		),
-	});
-	stbi_image_free(pixels);
-	vkof::image_generate_mipmaps(image);
+		if (img->buffer_view) {
+			u8 const * encoded = (
+				(u8 const *)img->buffer_view->buffer->data
+				+ img->buffer_view->offset
+			);
+			int const encodedLen = (int)img->buffer_view->size;
+			pixels = stbi_load_from_memory(encoded, encodedLen, &w, &h, &channels, 4);
+		} else if (img->uri && strncmp(img->uri, "data:", 5) != 0) {
+			std::string const fullPath = (std::filesystem::path(s.gltfDir) / img->uri).string();
+			pixels = stbi_load(fullPath.c_str(), &w, &h, &channels, 4);
+		}
+
+		if (!pixels) {
+			printf(
+				"mor: failed to load texture '%s'\n",
+				img->uri ? img->uri : "[embedded]"
+			);
+			return { 0u, uvTransform };
+		}
+
+		u32 const mipLevels = (
+			(u32)std::floor(std::log2((f32)std::max(w, h))) + 1u
+		);
+		image = vkof::image_create({
+			.width = (u32)w,
+			.height = (u32)h,
+			.format = (
+				srgb
+				? vkof::ImageFormat::r8g8b8a8_srgb
+				: vkof::ImageFormat::r8g8b8a8_unorm
+			),
+			.mipLevels = mipLevels,
+			.optInitialData = srat::slice<u8 const>(
+				pixels, (u64)w * h * 4
+			),
+		});
+		stbi_image_free(pixels);
+		vkof::image_generate_mipmaps(image);
+	}
 
 	auto const toFilter = [](int gl) -> vkof::SamplerFilter {
 		if (gl == 9728 || gl == 9984 || gl == 9986) {
@@ -474,6 +612,65 @@ static void material_load_pbr_metallic_roughness(
 		mr.base_color_factor[2],
 	};
 	out.geometryOpacity.r = mr.base_color_factor[3];
+}
+
+static void material_load_pbr_specular_glossiness(
+	ImplScene & s,
+	cgltf_pbr_specular_glossiness const & sg,
+	GpuMorMaterial & out
+) {
+	// GLTF (KHR_materials_pbrSpecularGlossiness, archived):
+	// cgltf_texture_view diffuse_texture;
+	// cgltf_texture_view specular_glossiness_texture;
+	// cgltf_float diffuse_factor[4];
+	// cgltf_float specular_factor[3];
+	// cgltf_float glossiness_factor;
+	// OpenPBR:
+	// base-color, geometry-opacity, specular-color, specular-roughness
+	//
+	// approximate mapping: diffuse drives the dielectric base, specular rgb
+	// tints the dielectric fresnel, and roughness = 1 - glossiness via the
+	// invert swizzle bit. spec-gloss metals (colored specular over a black
+	// diffuse) are not reconstructed into a metallic lobe
+
+	// -- diffuse
+	if (sg.diffuse_texture.texture) {
+		TextureRef const t = load_texture(s, sg.diffuse_texture, true);
+		out.baseColor.texture = t.handle;
+		out.baseColor.uvTransform = t.uvTransform;
+		// alpha is linear even in srgb images; reuse the srgb texture
+		out.geometryOpacity.texture = t.handle;
+		out.geometryOpacity.uvTransform = t.uvTransform;
+		// opacity is in A
+		out.geometryOpacity.swizzle = 3;
+	}
+
+	// -- specular + glossiness
+	if (sg.specular_glossiness_texture.texture) {
+		TextureRef const t = load_texture(s, sg.specular_glossiness_texture, true);
+		out.specularColor.texture = t.handle;
+		out.specularColor.uvTransform = t.uvTransform;
+		// glossiness is in A (linear even in srgb images)
+		out.specularRoughness.texture = t.handle;
+		out.specularRoughness.uvTransform = t.uvTransform;
+		out.specularRoughness.swizzle = 3;
+	}
+	// resolved value is 1 - glossiness_factor * gloss_texture.a, textured
+	// or not; the shader floors it to its minimum roughness
+	out.specularRoughness.swizzle |= MOR_MATERIAL_SWIZZLE_INVERT;
+	out.specularRoughness.r = sg.glossiness_factor;
+
+	out.baseColor.rgb = f32v3 {
+		sg.diffuse_factor[0],
+		sg.diffuse_factor[1],
+		sg.diffuse_factor[2],
+	};
+	out.geometryOpacity.r = sg.diffuse_factor[3];
+	out.specularColor.rgb = f32v3 {
+		sg.specular_factor[0],
+		sg.specular_factor[1],
+		sg.specular_factor[2],
+	};
 }
 
 static void material_load_clearcoat(
@@ -802,7 +999,7 @@ static void load_primitive(
 	cgltf_primitive const & prim,
 	u32 const instanceIndex
 ) {
-	if (prim.type != cgltf_primitive_type_triangles || !prim.indices) return;
+	if (prim.type != cgltf_primitive_type_triangles) return;
 
 	cgltf_accessor * posAcc = nullptr;
 	cgltf_accessor * normAcc = nullptr;
@@ -824,7 +1021,9 @@ static void load_primitive(
 
 	u32 const vertexBase = (u32)s->positions.size();
 	u32 const vertexCount = (u32)posAcc->count;
-	u32 const indexCount = (u32)prim.indices->count;
+	u32 const indexCount = (
+		prim.indices ? (u32)prim.indices->count : vertexCount
+	);
 
 	// -- positions
 	{
@@ -868,8 +1067,14 @@ static void load_primitive(
 
 	// -- indices
 	std::vector<u32> indices(indexCount);
-	for (u32 i = 0; i < indexCount; ++i) {
-		indices[i] = (u32)cgltf_accessor_read_index(prim.indices, i);
+	if (prim.indices) {
+		for (u32 i = 0; i < indexCount; ++i) {
+			indices[i] = (u32)cgltf_accessor_read_index(prim.indices, i);
+		}
+	} else {
+		for (u32 i = 0; i < indexCount; ++i) {
+			indices[i] = i;
+		}
 	}
 
 	// -- materials
@@ -883,7 +1088,14 @@ static void load_primitive(
 			cgltf_material const & mat = *prim.material;
 			GpuMorMaterial gpuMaterial = material_load_default();
 
-			if (mat.has_pbr_metallic_roughness)  {
+			// spec-gloss wins over the core block when both are present:
+			// the extension is the authored intent, the core block is the
+			// compatibility fallback
+			if (mat.has_pbr_specular_glossiness) {
+				material_load_pbr_specular_glossiness(
+					*s, mat.pbr_specular_glossiness, gpuMaterial
+				);
+			} else if (mat.has_pbr_metallic_roughness)  {
 				material_load_pbr_metallic_roughness(
 					*s, mat.pbr_metallic_roughness, gpuMaterial
 				);
@@ -1342,12 +1554,14 @@ void mor::scene_load_gltf(mor::Scene const & scene, char const * const path) {
 		cgltf_load_buffers(&options, data, path) == cgltf_result_success
 	);
 
+	s->data = data;
 	for (cgltf_size si = 0; si < data->scenes_count; ++si) {
 		cgltf_scene const & gltfScene = data->scenes[si];
 		for (cgltf_size ni = 0; ni < gltfScene.nodes_count; ++ni) {
 			load_node(s, gltfScene.nodes[ni]);
 		}
 	}
+	s->data = nullptr;
 
 	cgltf_free(data);
 }

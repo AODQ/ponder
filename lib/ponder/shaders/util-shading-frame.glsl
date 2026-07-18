@@ -29,6 +29,25 @@ void utilCalculateXy(
 	bitangent = f32v3(b, sgn + nor.y*nor.y*a, -nor.y);
 }
 
+mat3 utilCalculateTbnBasis(
+	const vec3 nor,
+	const vec4 tangent
+) {
+	// gram-schmidt re-orthogonalization
+	const vec3 n = normalize(nor);
+	const vec3 tRaw = tangent.xyz - n * dot(n, tangent.xyz);
+	const float tLen = length(tRaw);
+	if (tLen < 1e-6) {
+		// degerate tangent, fall-back to Frisvad basis
+		vec3 binormal, bitangent;
+		utilCalculateXy(n, binormal, bitangent);
+		return mat3(binormal, bitangent, n);
+	}
+	const vec3 t = tRaw / tLen;
+	const vec3 bitangent = (cross(n, t) * tangent.w);
+	return mat3(t, bitangent, n);
+}
+
 // shading frame for the anisotropic lobes; tanY = cross(nor, tanX).
 // bitangent handedness does not matter distribution-wise: the aniso ggx D
 // and smith lambda are even in both tangent axes, and the cap sampler's
@@ -85,6 +104,30 @@ ShadingFrame shadingFrameRotate(const ShadingFrame frame, const f32 rotation) {
 	rotated.tanY = c * frame.tanY - s * frame.tanX;
 	rotated.nor = frame.nor;
 	return rotated;
+}
+
+vec3 utilReorientHemisphere(vec3 wo, vec3 nor) {
+	vec3 binormal, bitangent;
+	const vec3 n = normalize(nor);
+	utilCalculateXy(n, binormal, bitangent);
+	return bitangent*wo.x + binormal*wo.y + wo.z*n;
+}
+
+vec3 utilToCartesian(const float cosTheta, const float phi) {
+	const float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta*cosTheta));
+	return vec3(cos(phi)*sinTheta, sin(phi)*sinTheta, cosTheta);
+}
+
+vec3 utilCosineHemisphereSampleWo(
+	vec3 nor, const vec2 xi
+) {
+	const vec3 wo = (
+		utilReorientHemisphere(
+			normalize(utilToCartesian(sqrt(xi.x), skTau*xi.y)),
+			nor
+		)
+	);
+	return wo;
 }
 
 #endif // UTIL_SHADING_FRAME_GLSL

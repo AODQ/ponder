@@ -33,11 +33,18 @@ layout(set = 0, binding = 4) uniform sampler3D vkofTextures3D[];
 #include "util-random.glsl"
 #include "util-raytrace.glsl"
 
+#include "util-vdb.glsl"
+
 layout(local_size_x = 16, local_size_y = 16) in;
 
 void main() {
-	const GpuDebugPC unf = GpuDebugPCBuffer(pc.global.debug).data;
-	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const GpuGlobalExtended unf = (
+		GpuGlobalExtendedBuffer(pc.global.extended).data
+	);
+	const ivec2 coord = (
+		ivec2(gl_GlobalInvocationID.xy)
+		+ ivec2(pc.resolve.tileOriginX, pc.resolve.tileOriginY)
+	);
 	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
 	if (coord.x >= screensize.x || coord.y >= screensize.y) { return; }
 	nanProbeInit(unf.nanProbeCounterVa, coord);
@@ -52,10 +59,16 @@ void main() {
 				pc.resolve.frameIndex % pc.resolve.bluenoiseCount
 			]
 		);
+		// utilGenerateSeeds derives its pixel identity from the tile-local
+		// gl_GlobalInvocationID, which restarts at (0, 0) for every tiled
+		// dispatch -- the packed tile origin as salt keeps streams distinct
+		// across tiles, and stays 0 for a full-screen dispatch so untiled
+		// frames seed exactly as before. its bluenoise lookup needs no such
+		// fix: origins are multiples of the texture's 128px wrap period
 		utilGenerateSeeds(
 			state, state2, seed, seed2,
 			/*frameIndex=*/ pc.resolve.frameIndex,
-			/*salt=*/ 0u,
+			/*salt=*/ (pc.resolve.tileOriginY << 16) | pc.resolve.tileOriginX,
 			bluenoiseTextureHandle
 		);
 	}
@@ -70,68 +83,104 @@ void main() {
 	const f32v4 worldFar = invVP * f32v4(ndc, 1.0f, 1.0f);
 	const f32v3 rayDir = normalize(worldFar.xyz / worldFar.w - pc.global.cameraPos);
 
-	const RayQueryResult primaryHit = (
-		utilTraceRay(
-			pc.global.cameraPos,
-			rayDir,
-			999999.0f,
-			/*isShadowRay=*/false,
-			/*testAlphaCutoff=*/true
-		)
-	);
-
-	if (primaryHit.dist <= 0.0f) {
-		imageStore(
-			vkofImages[pc.resolve.outputImageHandle],
-			coord,
-			f32v4(
-				sampleEnvironment(rayDir, unf.envIntensity, unf.envMode),
-				1.0f
+	// FRAME_MODE_VIEW: camera is actively moving -- one ray, no light
+	// transport, just the hit surface's resolved base color (the "diffuse
+	// texture parameter") for cheap full-screen feedback every dragged
+	// frame. see GpuGlobalExtended.frameMode's comment for the full
+	// view/clear/pathtrace sequence
+	if (unf.frameMode == 0) {
+		const RayQueryResult hit = (
+			utilTraceRay(
+				pc.global.cameraPos,
+				rayDir,
+				999999.0f,
+				/*isShadowRay=*/false,
+				/*testAlphaCutoff=*/true
 			)
+		);
+		f32v3 color = f32v3(0.0f);
+		f32 alpha = 0.0f;
+		if (hit.dist > 0.0f) {
+			UtilMeshAttributeDataFromIndices rqData = (
+				utilMeshAttributeDataFromIndices(
+					hit.modelDrawIndex,
+					hit.primitiveIndex,
+					hit.barycentric,
+					/*unpackUvDerivatives=*/false
+				)
+			);
+			f32v3 geometryNormal, geometryCoatNormal;
+			f32v4 geometryTangent, geometryCoatTangent;
+			const OpenPbrMaterial mat = (
+				openPbrLoadMaterialDeriv(
+					rqData.material,
+					rqData.uvTransforms,
+					rqData.uv,
+					f32v2(0.0f),
+					f32v2(0.0f),
+					geometryNormal,
+					geometryTangent,
+					geometryCoatNormal,
+					geometryCoatTangent
+				)
+			);
+			color = mat.baseColor;
+			alpha = 1.0f;
+		}
+		imageStore(
+			vkofImages[pc.resolve.outputImageHandle], coord, f32v4(color, alpha)
 		);
 		return;
 	}
 
-	UtilMeshAttributeDataFromIndices rqData = (
-		utilMeshAttributeDataFromIndices(
-			primaryHit.modelDrawIndex,
-			primaryHit.primitiveIndex,
-			primaryHit.barycentric
-		)
-	);
+	UtilVdb vdb;
+	vdb.isValid = false;
+	if (unf.vdb != 0u) {
+		// unf.vdb points at the VdbHandle descriptor (grid address +
+		// densityMax), not at the raw grid blob
+		vdb = utilVdbBindHandle(unf.vdb, unf.vdbWorldToLocal);
+		vdb.isValid = true;
+	}
+
 	// material inspector probe: unf.probePixel is (-1,-1) on every frame
-	// except the one right after a right-click, so this only ever prints
+	// except the one right after a right-click, so this only ever fires
 	// for the single invocation whose pixel the user actually clicked
 	if (coord == unf.probePixel) {
-		debugPrintfEXT("MODEL ID: %d", rqData.materialIndex);
+		// first ray query into physical surfaces
+		RayQueryResult primaryHit = (
+			utilTraceRay(
+				pc.global.cameraPos,
+				rayDir,
+				999999.0f,
+				/*isShadowRay=*/false,
+				/*testAlphaCutoff=*/true
+			)
+		);
+		// utilTraceRay's miss case returns dist=0 with modelDrawIndex=0 --
+		// which happens to look like a real hit against instance 0, so a
+		// click on empty space needs its own explicit sentinel rather than
+		// reporting whatever garbage instance-0-indexed data would produce
+		GpuProbeResult result = GpuProbeResult(-1, -1);
+		if (primaryHit.dist > 0.0f) {
+			UtilMeshAttributeDataFromIndices rqData = (
+				utilMeshAttributeDataFromIndices(
+					primaryHit.modelDrawIndex,
+					primaryHit.primitiveIndex,
+					primaryHit.barycentric,
+					/*unpackUvDerivatives=*/true
+				)
+			);
+			// modelDrawIndex distinguishes which stage instance was hit
+			// (file view only ever has one, so it's always 0 there);
+			// materialIndex is scoped to that instance's own material table
+			result = GpuProbeResult(
+				int(primaryHit.modelDrawIndex), int(rqData.materialIndex)
+			);
+		}
+		// a plain buffer write, not debug_printf -- the cpu reads this back
+		// directly, no validation layers/probe_message plumbing needed
+		GpuProbeResultBuffer(unf.probeResult).data = result;
 	}
-	const f32v3 origin = pc.global.cameraPos + rayDir * primaryHit.dist;
-	const mat3 tbn = utilCalculateTbnBasis(rqData.normal, rqData.tangent);
-	f32v3 modelNormal;
-	f32v4 modelTangent;
-	f32v3 modelCoatNormal;
-	f32v4 modelCoatTangent;
-	const OpenPbrMaterial bsdfMaterial = (
-		openPbrLoadMaterialDeriv(
-			/*mat=*/ rqData.material,
-			/*uvTransforms=*/rqData.uvTransforms,
-			/*uv=*/rqData.uv,
-			/*uvDx=*/f32v2(0.0f),
-			/*uvDy=*/f32v2(0.0f),
-			modelNormal, modelTangent, modelCoatNormal, modelCoatTangent
-		)
-	);
-	const f32v3 normalWorld = normalize(tbn * modelNormal);
-	const ShadingFrame frame = (
-		shadingFrameFromTangent(normalWorld, rqData.tangent.xyz)
-	);
-	const ShadingFrame coatFrame = (
-		shadingFrameFromTangent(
-			normalize(tbn * modelCoatNormal), rqData.tangent.xyz
-		)
-	);
-	const f32v3 normalGeometrical = rqData.normalGeometrical;
-	const f32v3 wi = -rayDir;
 
 	const MaterialTableHandles materialTables = (
 		MaterialTableHandles(
@@ -143,20 +192,31 @@ void main() {
 	const f32v4 irradiance = (
 		utilIrradiancePropagationEntry(
 			/*tables=*/materialTables,
-			/*originalMaterial=*/bsdfMaterial,
-			/*origin=*/origin,
-			/*frame=*/frame,
-			/*coatFrame=*/coatFrame,
-			/*normalGeometrical=*/normalGeometrical,
-			/*wi=*/wi,
+			/*vdb=*/vdb,
+			/*origin=*/pc.global.cameraPos,
+			/*wi=*/rayDir,
 			/*propagationDepth=*/8u,
-			/*state=*/state
+			/*state=*/state,
+			/*unf=*/unf
 		)
+	);
+
+	// firefly clamp: see GpuGlobalExtended.fireflyClampLuminance. rescales
+	// by luminance ratio (rather than clamping each channel independently)
+	// so a clamped sample keeps its hue instead of shifting toward white
+	const f32 irradianceLuminance = (
+		dot(irradiance.rgb, f32v3(0.2126f, 0.7152f, 0.0722f))
+	);
+	const f32v3 clampedRgb = (
+		unf.fireflyClampLuminance > 0.0f
+		&& irradianceLuminance > unf.fireflyClampLuminance
+			? irradiance.rgb * (unf.fireflyClampLuminance / irradianceLuminance)
+			: irradiance.rgb
 	);
 
 	imageStore(
 		vkofImages[pc.resolve.outputImageHandle],
 		coord,
-		irradiance
+		f32v4(clampedRgb, irradiance.a)
 	);
 }

@@ -291,9 +291,14 @@ OpenPbrLobeSelection openPbrLobeSelection(
 	sel.probabilityDiffuse = baseBudget * (1.0f - mat.transmissionWeight);
 	sel.probabilityTransmission = baseBudget * mat.transmissionWeight;
 	// zeltner sheen: selection probability from the fitted directional
-	// albedo R (LUT .z); a and b ride along for the sample/pdf pair
+	// albedo R (LUT .z); a and b ride along for the sample/pdf pair. skip
+	// the LUT fetch entirely when there's no fuzz to select in the first
+	// place -- probabilityFuzz/fuzzA/fuzzB all come out to exactly the same
+	// zero this would have produced anyway
 	const vec3 fuzzParams = (
-		utilZeltnerFuzzLookup(tables, mu, mat.fuzzRoughness)
+		mat.fuzzWeight > 0.0f
+			? utilZeltnerFuzzLookup(tables, mu, mat.fuzzRoughness)
+			: vec3(0.0f)
 	);
 	NAN_CHECK3(fuzzParams, "NaN openPbrLobeSelection.fuzzParams px(%d,%d)=%v3f")
 	sel.probabilityFuzz = mat.fuzzWeight * fuzzParams.z;
