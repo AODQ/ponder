@@ -1,0 +1,46 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+
+// kawase-style widening 4-tap blur, ported from
+// ~/repo/demo/shaders/bloom_blur.comp. bilinear sampling at a fractional
+// texel offset (passIndex + 0.5) is the whole trick -- it's what makes 4
+// taps look like a much wider soft blur, so this reads via vkofTextures[]
+// (sampler2D) rather than imageLoad
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+
+#include "shared/global_pc.h"
+#include "bloom-blur-pc.h"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const GpuGlobalExtended unf = (
+		GpuGlobalExtendedBuffer(pc.global.extended).data
+	);
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
+	if (coord.x >= screensize.x || coord.y >= screensize.y) { return; }
+
+	const f32v2 uv = (f32v2(coord) + 0.5f) / f32v2(screensize);
+	const f32 offset = f32(pc.bloomBlur.passIndex) + 0.5f;
+	const f32v2 texel = 1.0f / f32v2(screensize);
+	const u32 h = pc.bloomBlur.inputHandle;
+
+	f32v3 col = texture(vkofTextures[h], uv + f32v2( offset,  offset) * texel).rgb;
+	col      += texture(vkofTextures[h], uv + f32v2(-offset,  offset) * texel).rgb;
+	col      += texture(vkofTextures[h], uv + f32v2( offset, -offset) * texel).rgb;
+	col      += texture(vkofTextures[h], uv + f32v2(-offset, -offset) * texel).rgb;
+	col *= 0.25f;
+
+	imageStore(
+		vkofImages[pc.bloomBlur.outputHandle], coord, f32v4(col, 1.0f)
+	);
+}

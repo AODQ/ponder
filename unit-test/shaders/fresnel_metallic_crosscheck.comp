@@ -1,0 +1,52 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "util-fresnel.glsl"
+#include "util-fresnel-materialx-reference.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
+
+// per sample, 8 floats: f0.xyz, specularWeight, specularColor.xyz, dotNorWi
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t mineOutVa;
+	uint64_t refOutVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 8u;
+	const f32v3 f0 = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+	const f32 specularWeight = inBuf.data[base+3u];
+	const f32v3 specularColor = (
+		f32v3(inBuf.data[base+4u], inBuf.data[base+5u], inBuf.data[base+6u])
+	);
+	const f32 dotNorWi = inBuf.data[base+7u];
+
+	F32v3Buffer(pc.mineOutVa).data[i] = (
+		utilFresnelMetallic(f0, specularWeight, specularColor, dotNorWi)
+	);
+	// clamped to match ponder's deliberate f82 >= 0 deviation (see
+	// utilFresnelMetallic); materialx's own hoffman-schlick returns the
+	// raw, possibly-negative value
+	F32v3Buffer(pc.refOutVa).data[i] = (
+		max(
+			mxFresnelHoffmanSchlick(
+				dotNorWi, f0, specularWeight * specularColor, f32v3(1.0f), 5.0f
+			),
+			f32v3(0.0f)
+		)
+	);
+}

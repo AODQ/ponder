@@ -1,0 +1,6 @@
+assets/
+screenshots/
+*.spirv
+*.stage
+third-party/
+unit-test/

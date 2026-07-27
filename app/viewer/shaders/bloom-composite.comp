@@ -1,0 +1,41 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+
+// additive bloom composite onto the already-tonemapped display image
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+
+#include "shared/global_pc.h"
+#include "bloom-composite-pc.h"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const GpuGlobalExtended unf = (
+		GpuGlobalExtendedBuffer(pc.global.extended).data
+	);
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
+	if (coord.x >= screensize.x || coord.y >= screensize.y) { return; }
+
+	const f32v3 color = (
+		imageLoad(vkofImages[pc.bloomComposite.colorHandle], coord).rgb
+	);
+	const f32v3 bloom = (
+		imageLoad(vkofImages[pc.bloomComposite.bloomHandle], coord).rgb
+	);
+	const f32v3 outColor = (
+		clamp(color + bloom * pc.bloomComposite.intensity, 0.0f, 1.0f)
+	);
+
+	imageStore(
+		vkofImages[pc.bloomComposite.colorHandle], coord, f32v4(outColor, 1.0f)
+	);
+}

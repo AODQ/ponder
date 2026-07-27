@@ -1,0 +1,63 @@
+#version 460
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+layout(set = 0, binding = 4) uniform sampler3D vkofTextures3D[];
+
+#include "env-prefilter-pc.h"
+#include "util-environment-map.glsl"
+#include "util-shading-frame.glsl"
+#include "util-env-prefilter.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// cosine-hemisphere convolution; cosine-weighted sampling's pdf (cosTheta/pi)
+// cancels both the brdf's 1/pi and the integral's cosTheta term exactly, so
+// the plain sample mean is already "albedo * mean == diffuse reflected
+// radiance", no extra normalization needed at the shading call site
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (
+		coord.x >= int(pc.prefilter.dstWidth)
+		|| coord.y >= int(pc.prefilter.dstHeight)
+	) {
+		return;
+	}
+	const vec2 uv = (
+		(vec2(coord) + 0.5f)
+		/ vec2(pc.prefilter.dstWidth, pc.prefilter.dstHeight)
+	);
+	const vec3 n = environmentMapUvToDir(uv, 0.0f);
+
+	// a hemisphere-wide cosine lobe is wider than even the roughest
+	// specular mip, so always read the source's coarsest mip -- see
+	// env-prefilter-specular.comp's srcLod comment for why point-sampling
+	// the full-res source doesn't converge
+	const float srcLod = (
+		float(textureQueryLevels(vkofTextures[pc.prefilter.srcRadianceHandle]) - 1)
+	);
+
+	vec3 sum = vec3(0.0f);
+	const uint sampleCount = pc.prefilter.sampleCount;
+	for (uint i = 0u; i < sampleCount; ++i) {
+		const vec2 xi = envPrefilterHammersley(i, sampleCount);
+		const vec3 l = utilCosineHemisphereSampleWo(n, xi);
+		const vec2 srcUv = environmentMapDirToUv(l, 0.0f);
+		sum += (
+			textureLod(vkofTextures[pc.prefilter.srcRadianceHandle], srcUv, srcLod).rgb
+		);
+	}
+	const vec3 result = sum / float(sampleCount);
+
+	imageStore(vkofImages[pc.prefilter.dstStorageHandle], coord, vec4(result, 1.0f));
+}

@@ -1,0 +1,103 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// discrete lobe-selection side: dispatches the full openPbrSampleWo with a
+// material that only has diffuse + subsurface budget (coat/specular/fuzz/
+// transmission/metalness all zero), and records which OPENPBR_LOBE_* got
+// picked. the fraction landing on OPENPBR_LOBE_SUBSURFACE_ENTRY must match
+// pc.subsurfaceWeight -- the same discrete stochastic-split identity every
+// other pair of lobes in openPbrLobeSelection already relies on.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+// util-material-openpbr.glsl defines IPI/PI/TAU/skFon1/skFon2/skMinRoughness
+// itself -- pulling it in directly rather than the piecewise subsurface.glsl
+// include used by the other subsurface_*.comp test shaders, since this one
+// needs the full lobe-selection/openPbrSampleWo machinery
+#include "util-material-openpbr.glsl"
+
+layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t pickCountVa;
+	uint sampleCount;
+	uint seedSalt;
+	float subsurfaceWeight;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint sampleIndex = gl_GlobalInvocationID.x;
+	if (sampleIndex >= pc.sampleCount) {
+		return;
+	}
+
+	const uint h0 = fnPcgHash(sampleIndex + fnPcgHash(pc.seedSalt));
+	const uint h1 = fnPcgHash(h0);
+	u64 state = (u64(h0) << 32) | u64(h1);
+
+	OpenPbrMaterial mat;
+	mat.baseWeight = 1.0f;
+	mat.baseColor = vec3(0.8f);
+	mat.baseMetalness = 0.0f;
+	mat.baseDiffuseRoughness = 0.0f;
+	mat.specularWeight = 0.0f;
+	mat.specularColor = vec3(1.0f);
+	mat.specularRoughness = 0.3f;
+	mat.specularRoughnessAnisotropy = 0.0f;
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.specularIor = 1.5f;
+	mat.transmissionWeight = 0.0f;
+	mat.transmissionColor = vec3(1.0f);
+	mat.transmissionDepth = 0.0f;
+	mat.transmissionScatter = vec3(0.0f);
+	mat.transmissionScatterAnisotropy = 0.0f;
+	mat.transmissionDispersionScale = 0.0f;
+	mat.transmissionDispersionAbbeNumber = 20.0f;
+	mat.subsurfaceWeight = pc.subsurfaceWeight;
+	mat.subsurfaceColor = vec3(0.8f);
+	mat.subsurfaceRadius = 1.0f;
+	mat.subsurfaceRadiusScale = vec3(1.0f);
+	mat.subsurfaceScatterAnisotropy = 0.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatColor = vec3(1.0f);
+	mat.coatRoughness = 0.0f;
+	mat.coatRoughnessAnisotropy = 0.0f;
+	mat.coatIor = 1.6f;
+	mat.coatDarkening = 1.0f;
+	mat.fuzzWeight = 0.0f;
+	mat.fuzzColor = vec3(1.0f);
+	mat.fuzzRoughness = 0.3f;
+	mat.emissionLuminance = 0.0f;
+	mat.emissionColor = vec3(0.0f);
+	mat.thinFilmWeight = 0.0f;
+	mat.thinFilmThickness = 0.0f;
+	mat.thinFilmIor = 1.3f;
+	mat.geometryOpacity = 1.0f;
+	mat.geometryThinWalled = 0.0f;
+	mat.alphaCutoff = 0.0f;
+
+	const ShadingFrame frame = shadingFrameFromNormal(vec3(0.0f, 0.0f, 1.0f));
+	const vec3 wi = vec3(0.0f, 0.0f, 1.0f);
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = 0u;
+	tables.zeltnerLtcParam = 0u;
+
+	float pdf;
+	bool sampledTransmission;
+	bool sampledSubsurfaceEntry;
+	uint pickedLobe;
+	openPbrSampleWo(
+		tables, frame, frame, wi, mat,
+		pdf, sampledTransmission, sampledSubsurfaceEntry, pickedLobe,
+		state,
+		/*isInsideMedium=*/false, /*dispersedIor=*/mat.specularIor
+	);
+
+	atomicAdd(U32Buffer(pc.pickCountVa).data[pickedLobe], 1u);
+}

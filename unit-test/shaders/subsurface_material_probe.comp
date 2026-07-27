@@ -1,0 +1,140 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// DEBUG-only probe: traces the camera ray through utilTraceRay (same as
+// production) and dumps whatever openPbrLoadMaterialDeriv/utilLoadSurfaceHit
+// actually resolves for subsurfaceColor/subsurfaceRadius/subsurfaceWeight at
+// the hit point, instead of running the real irradiance walk -- isolates
+// whether the material override is reaching the shader at all versus a bug
+// further down the pipeline.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "mor/mor-shared.h"
+
+#define RESOLVE_NO_PC
+#include "resolve_pc.h"
+
+struct GpuSubsurfaceProbePC {
+	u64 outVa;
+	u32 width;
+	u32 height;
+	// 0 = subsurfaceColor, 1 = coatColor, 2 = subsurfaceRadiusScale
+	u32 fieldSelect;
+};
+layout(push_constant, scalar) uniform PC {
+	GpuGlobalPc global;
+	GpuSubsurfaceProbePC probe;
+} pc;
+
+#include "environment.glsl"
+#include "util-random.glsl"
+#include "util-raytrace.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (coord.x >= int(pc.probe.width) || coord.y >= int(pc.probe.height)) {
+		return;
+	}
+	const ivec2 screensize = ivec2(pc.probe.width, pc.probe.height);
+	const uint pixel = uint(coord.y) * pc.probe.width + uint(coord.x);
+
+	const f32v2 uv = (f32v2(coord) + 0.5f) / f32v2(screensize);
+	const f32v2 ndc = uv * 2.0f - 1.0f;
+	const mat4 invVP = inverse(pc.global.viewProj);
+	const f32v4 worldFar = invVP * f32v4(ndc, 1.0f, 1.0f);
+	const f32v3 rayDir = (
+		normalize(worldFar.xyz / worldFar.w - pc.global.cameraPos)
+	);
+
+	F32Buffer outBuf = F32Buffer(pc.probe.outVa);
+	const uint pixelCount = pc.probe.width * pc.probe.height;
+
+	const RayQueryResult rq = (
+		utilTraceRay(pc.global.cameraPos, rayDir, 999999.0f, false, true)
+	);
+	if (rq.dist <= 0.0f) {
+		outBuf.data[pixel] = -1.0f;
+		outBuf.data[pixelCount + pixel] = -1.0f;
+		outBuf.data[2u * pixelCount + pixel] = -1.0f;
+		return;
+	}
+
+	f32v3 itOri = pc.global.cameraPos;
+	OpenPbrMaterial material;
+	ShadingFrame itFrame;
+	ShadingFrame itCoatFrame;
+	f32v3 itNormalGeometrical;
+	f32v3 itWi;
+	utilLoadSurfaceHit(
+		rq, itOri, rayDir,
+		material, itFrame, itCoatFrame, itNormalGeometrical, itWi
+	);
+
+	f32v3 chosen = material.subsurfaceColor;
+	if (pc.probe.fieldSelect == 1u) {
+		chosen = material.coatColor;
+	} else if (pc.probe.fieldSelect == 2u) {
+		chosen = material.subsurfaceRadiusScale;
+	}
+	outBuf.data[pixel] = chosen.r;
+	outBuf.data[pixelCount + pixel] = chosen.g;
+	outBuf.data[2u * pixelCount + pixel] = chosen.b;
+
+	// DEBUG: reads the exact same bytes via a raw-float reinterpretation
+	// instead of the GpuMorMaterial struct type, bypassing whatever
+	// buffer(decorated struct)->value-type-struct copy the compiler
+	// generates for the .rgb field access above -- byte offset 304 is
+	// subsurfaceColor's confirmed-correct offset (spirv-dis
+	// OpMemberDecorate matches C++ offsetof exactly), float index 76 =
+	// 304/4. single-material scene, materialIndex 0 assumed
+	const GpuResolveModelIndirect modelDesc = (
+		GpuResolveModelIndirectBuffer(pc.global.models).data[rq.modelDrawIndex]
+	);
+	F32Buffer rawMaterialFloats = F32Buffer(modelDesc.materials);
+	outBuf.data[3u * pixelCount + pixel] = rawMaterialFloats.data[76];
+	outBuf.data[4u * pixelCount + pixel] = rawMaterialFloats.data[77];
+	outBuf.data[5u * pixelCount + pixel] = rawMaterialFloats.data[78];
+
+	// DEBUG: direct per-field access on the buffer-indexed expression,
+	// never materializing a whole GpuMorMaterial value-type local at all
+	// (no "GpuMorMaterial mat = buf.data[idx];") -- tests whether the bug
+	// is specifically in the bulk struct-to-struct copy
+	GpuMorMaterialBuffer matBuf = GpuMorMaterialBuffer(modelDesc.materials);
+	const f32v3 directField = matBuf.data[0].subsurfaceColor.rgb;
+	outBuf.data[6u * pixelCount + pixel] = directField.x;
+	outBuf.data[7u * pixelCount + pixel] = directField.y;
+	outBuf.data[8u * pixelCount + pixel] = directField.z;
+
+	// DEBUG: openPbrLoadMaterialDeriv called directly here, bypassing
+	// utilLoadSurfaceHit's own `out OpenPbrMaterial material` parameter
+	// entirely -- isolates whether the corruption is now in
+	// openPbrLoadMaterialDeriv's own OpenPbrMaterial return (a
+	// structurally similar large multi-vec3-field struct), or in how
+	// utilLoadSurfaceHit's out-parameter copies it out afterward
+	f32v3 dgn, dgcn;
+	f32v4 dgt, dgct;
+	const OpenPbrMaterial directMat = (
+		openPbrLoadMaterialDeriv(
+			matBuf, 0u,
+			GpuMorUvTransformBuffer(modelDesc.uvTransforms),
+			f32v2(0.0f), f32v2(0.0f), f32v2(0.0f),
+			dgn, dgt, dgcn, dgct
+		)
+	);
+	outBuf.data[9u * pixelCount + pixel] = directMat.subsurfaceColor.x;
+	outBuf.data[10u * pixelCount + pixel] = directMat.subsurfaceColor.y;
+	outBuf.data[11u * pixelCount + pixel] = directMat.subsurfaceColor.z;
+}

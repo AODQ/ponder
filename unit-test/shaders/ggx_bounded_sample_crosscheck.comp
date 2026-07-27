@@ -1,0 +1,110 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// cross-check of the bounded ggx sampler/pdf against materialx's
+// spherical-cap vndf sampler and pdf. the two samplers share the identical
+// cap parameterization (phi = 2 pi xi.x, z = (1 - xi.y)(1 + b) - b); they
+// differ only in the cap's lower bound b. for wi.z <= 0 the bounded sampler
+// falls back to b = iStd.z, which is exactly materialx's unbounded cap, so
+// the sampled directions must match bit-for-bit given the same xi. for
+// wi.z > 0 the bound k shrinks the cap and only the pdfs remain related:
+// ponderPdf / mxPdf = (iz + t) / (k iz + t), asserted host-side.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-microfacet-materialx-reference.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per sample, 7 floats in: wi.xyz, alpha.xy, xi.xy. output 8 floats:
+// mineWo.xyz, refWo.xyz, minePdf, refPdf. canonical local frame
+// (tanX=(1,0,0), tanY=(0,1,0), nor=(0,0,1)).
+//
+// refWo reflects wi about materialx's sampled half-vector; only comparable
+// to mineWo when wi.z <= 0 (see header). refPdf uses materialx's
+// mx_ggx_VNDF_reflection_PDF for wi.z > 0 (isotropic alpha only: materialx's
+// G1 is scalar-alpha); for wi.z <= 0 the G1-based form is out of its domain,
+// so the unbounded-cap pdf D / (2 (iz + t)) is assembled from mx_ggx_NDF
+// directly.
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 7u;
+	const f32v3 wi = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+	const f32v2 alpha = f32v2(inBuf.data[base+3u], inBuf.data[base+4u]);
+	const f32v2 xi = f32v2(inBuf.data[base+5u], inBuf.data[base+6u]);
+
+	const f32v3 tanX = f32v3(1.0f, 0.0f, 0.0f);
+	const f32v3 tanY = f32v3(0.0f, 1.0f, 0.0f);
+	const f32v3 nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	const f32v3 mineWo = (
+		utilMicrofacetSampleGgxBoundedWoAniso(tanX, tanY, nor, wi, alpha, xi)
+	);
+	const f32 minePdf = (
+		utilMicrofacetGgxBoundedReflectPdfAniso(
+			tanX, tanY, nor, wi, mineWo, alpha
+		)
+	);
+
+	const f32v3 refH = mx_ggx_importance_sample_VNDF(xi, wi, alpha);
+	const f32v3 refWo = 2.0f * dot(wi, refH) * refH - wi;
+
+	// pdf of the direction the ponder sampler produced, from materialx
+	// pieces; evaluated at mineWo's half-vector so both pdfs describe the
+	// same direction
+	const f32v3 h = normalize(wi + mineWo);
+	const f32 t = (
+		length(f32v3(alpha.x * wi.x, alpha.y * wi.y, wi.z))
+	);
+	f32 refPdf;
+	if (wi.z > 0.0f) {
+		refPdf = (
+			mx_ggx_VNDF_reflection_PDF(
+				h, alpha, mx_ggx_smith_G1(wi.z, alpha.x), wi.z
+			)
+		);
+	} else {
+		refPdf = mx_ggx_NDF(h, alpha) / (2.0f * (wi.z + t));
+	}
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	outBuf.data[i*8u+0u] = mineWo.x;
+	outBuf.data[i*8u+1u] = mineWo.y;
+	outBuf.data[i*8u+2u] = mineWo.z;
+	outBuf.data[i*8u+3u] = refWo.x;
+	outBuf.data[i*8u+4u] = refWo.y;
+	outBuf.data[i*8u+5u] = refWo.z;
+	outBuf.data[i*8u+6u] = minePdf;
+	outBuf.data[i*8u+7u] = refPdf;
+}

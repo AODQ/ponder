@@ -1,0 +1,201 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+
+#include "util-material-openpbr.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint zeltnerLtcParamHandle;
+	f32v3 wi;
+	f32 theta0;
+	f32 theta1;
+	f32 phi0;
+	f32 phi1;
+	f32 coatWeight;
+	f32 coatRoughness;
+	f32 coatIor;
+	f32 specularWeight;
+	f32 specularIor;
+	f32 specularRoughness;
+	f32 baseMetalness;
+	f32 transmissionWeight;
+	f32 fuzzWeight;
+	f32 fuzzRoughness;
+} pc;
+
+layout(local_size_x = 1) in;
+
+void main() {
+	const f32v3 tanX = f32v3(1.0f, 0.0f, 0.0f);
+	const f32v3 tanY = f32v3(0.0f, 1.0f, 0.0f);
+	const f32v3 nor = f32v3(0.0f, 0.0f, 1.0f);
+	ShadingFrame frame;
+	frame.tanX = tanX; frame.tanY = tanY; frame.nor = nor;
+	const ShadingFrame coatFrame = frame;
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = 0u;
+	tables.zeltnerLtcParam = pc.zeltnerLtcParamHandle;
+
+	OpenPbrMaterial mat;
+	mat.coatWeight = pc.coatWeight;
+	mat.coatRoughness = pc.coatRoughness;
+	mat.coatRoughnessAnisotropy = 0.0f;
+	mat.coatIor = pc.coatIor;
+	mat.specularWeight = pc.specularWeight;
+	mat.specularIor = pc.specularIor;
+	mat.specularRoughness = pc.specularRoughness;
+	mat.specularRoughnessAnisotropy = 0.0f;
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.baseMetalness = pc.baseMetalness;
+	mat.transmissionWeight = pc.transmissionWeight;
+	mat.transmissionColor = f32v3(1.0f);
+	mat.transmissionDepth = 0.0f;
+	mat.transmissionDispersionScale = 0.0f;
+	mat.transmissionDispersionAbbeNumber = 20.0f;
+	// openPbrLobeSelection now reads this to split the diffuse budget; left
+	// unset it's uninitialized gpu memory, not a guaranteed 0
+	mat.subsurfaceWeight = 0.0f;
+	mat.geometryThinWalled = 0.0f;
+	mat.fuzzWeight = pc.fuzzWeight;
+	mat.fuzzRoughness = pc.fuzzRoughness;
+
+	const OpenPbrLobeSelection sel = openPbrLobeSelection(tables, mat, dot(nor, pc.wi));
+
+	// scan the same 32x32 quadrature sub-grid mixture_expected.comp uses
+	// for this bin, tracking the max mixturePdf/transmissionTirPdf/specPdf
+	// and the (theta, phi) where the max occurred -- pinpoints a spike a
+	// single bin-center probe would miss entirely
+	const uint subGrid = 32u;
+	float maxMixture = -1.0f;
+	float maxMixtureTheta = 0.0f;
+	float maxMixturePhi = 0.0f;
+	float maxMixtureTirPdf = 0.0f;
+	float maxMixtureSpecPdf = 0.0f;
+	float maxMixtureTransPdf = 0.0f;
+	float maxMixtureDotNorWo = 0.0f;
+	float maxMixtureDotWiH = 0.0f;
+	float maxMixtureLenWiPlusWo = 0.0f;
+	for (uint j = 0u; j < subGrid; ++j) {
+		const float theta = mix(pc.theta0, pc.theta1, (float(j) + 0.5f) / float(subGrid));
+		for (uint k = 0u; k < subGrid; ++k) {
+			const float phi = mix(pc.phi0, pc.phi1, (float(k) + 0.5f) / float(subGrid));
+			const float phiFrame = phi - PI;
+			const float sinTheta = sin(theta);
+			const f32v3 wo = f32v3(
+				sinTheta * cos(phiFrame), sinTheta * sin(phiFrame), cos(theta)
+			);
+
+			const float roughenedSpecularRoughness = openPbrCoatRoughenedRoughness(
+				mat.specularRoughness, mat.coatRoughness, mat.coatWeight
+			);
+			const vec2 specAlpha = openPbrRoughnessAlpha(
+				roughenedSpecularRoughness, mat.specularRoughnessAnisotropy
+			);
+			const ShadingFrame specFrame = shadingFrameRotate(
+				frame, mat.specularRoughnessAnisotropyRotation
+			);
+			const float specPdf = utilMicrofacetGgxBoundedReflectPdfAniso(
+				specFrame.tanX, specFrame.tanY, specFrame.nor, pc.wi, wo, specAlpha
+			);
+			const float transmissionTirPdf = (
+				openPbrTransmissionTirReflectPdf(
+					mat, frame, pc.wi, wo, false, mat.specularIor
+				)
+			);
+			const float transmissionPdf = (
+				openPbrTransmissionPdf(mat, frame, pc.wi, wo, false, mat.specularIor)
+			);
+			const float mixturePdf = openPbrEvaluatePdfSelected(
+				sel, mat, frame, coatFrame, pc.wi, wo, false, mat.specularIor
+			);
+
+			if (mixturePdf > maxMixture) {
+				maxMixture = mixturePdf;
+				maxMixtureTheta = theta;
+				maxMixturePhi = phi;
+				maxMixtureTirPdf = transmissionTirPdf;
+				maxMixtureSpecPdf = specPdf;
+				maxMixtureTransPdf = transmissionPdf;
+				maxMixtureDotNorWo = dot(nor, wo);
+				const f32v3 wiPlusWo = pc.wi + wo;
+				maxMixtureLenWiPlusWo = length(wiPlusWo);
+				const f32v3 h = normalize(wiPlusWo);
+				maxMixtureDotWiH = dot(pc.wi, h);
+			}
+		}
+	}
+
+	// fine (256x256, 64x the coarse 32x32 mixture_expected.comp resolution)
+	// midpoint quadrature of the same bin, identical integration formula --
+	// settles whether a coarse-grid mismatch (quadrature artifact) explains
+	// an outlier bin, or whether the analytic pdf genuinely integrates to
+	// the same value at any resolution (a real formula/sampler disagreement)
+	const uint fineGrid = 256u;
+	float fineIntegral = 0.0f;
+	for (uint j = 0u; j < fineGrid; ++j) {
+		const float theta = mix(pc.theta0, pc.theta1, (float(j) + 0.5f) / float(fineGrid));
+		const float sinTheta = sin(theta);
+		for (uint k = 0u; k < fineGrid; ++k) {
+			const float phi = mix(pc.phi0, pc.phi1, (float(k) + 0.5f) / float(fineGrid));
+			const float phiFrame = phi - PI;
+			const f32v3 wo = f32v3(
+				sinTheta * cos(phiFrame), sinTheta * sin(phiFrame), cos(theta)
+			);
+			const float pdf = openPbrEvaluatePdfSelected(
+				sel, mat, frame, coatFrame, pc.wi, wo, false, mat.specularIor
+			);
+			fineIntegral += pdf * sinTheta;
+		}
+	}
+	fineIntegral *= (
+		(pc.theta1 - pc.theta0) * (pc.phi1 - pc.phi0) / f32(fineGrid * fineGrid)
+	);
+
+	// sidedness check at the max-mixture point: reconstruct the same
+	// generalized half vector openPbrTransmissionPdf uses and check whether
+	// wi and wo actually sit on opposite sides of it (dot(wi,ht) and
+	// dot(wo,ht) should have opposite sign for a physically valid refraction
+	// configuration -- walter et al. 2007 / pbrt's MicrofacetTransmission
+	// both gate on this explicitly; ponder's openPbrTransmissionPdf has no
+	// such gate)
+	const f32v3 woAtMax = f32v3(
+		sin(maxMixtureTheta) * cos(maxMixturePhi - PI),
+		sin(maxMixtureTheta) * sin(maxMixturePhi - PI),
+		cos(maxMixtureTheta)
+	);
+	const float etaISide = 1.0f;
+	const float etaTSide = mat.specularIor;
+	const f32v3 htUnnormSide = -(etaISide * pc.wi + etaTSide * woAtMax);
+	const f32v3 htSide = normalize(htUnnormSide);
+	const f32v3 htOrientedSide = dot(htSide, nor) < 0.0f ? -htSide : htSide;
+	const float dotWiHtSide = dot(pc.wi, htOrientedSide);
+	const float dotWoHtSide = dot(woAtMax, htOrientedSide);
+
+	F32Buffer out_ = F32Buffer(pc.outVa);
+	out_.data[0] = maxMixture;
+	out_.data[1] = maxMixtureTheta;
+	out_.data[2] = maxMixturePhi;
+	out_.data[3] = maxMixtureTirPdf;
+	out_.data[4] = maxMixtureSpecPdf;
+	out_.data[5] = maxMixtureDotWiH;
+	out_.data[6] = maxMixtureLenWiPlusWo;
+	out_.data[7] = sel.probabilitySpecular;
+	out_.data[8] = sel.probabilityTransmission;
+	out_.data[9] = sel.probabilityTotal;
+	out_.data[10] = maxMixtureTransPdf;
+	out_.data[11] = maxMixtureDotNorWo;
+	out_.data[12] = fineIntegral;
+	out_.data[13] = dotWiHtSide;
+	out_.data[14] = dotWoHtSide;
+}

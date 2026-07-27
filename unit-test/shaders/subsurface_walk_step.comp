@@ -1,0 +1,84 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// sampler side of openPbrSubsurfaceWalkStep
+// (util-material-openpbr-subsurface.glsl): one thread per sample, all
+// samples drawn from the same fixed (sigmaAbsorption, sigmaScattering,
+// distanceMax, wi, anisotropy, throughput) point so the outcomes can be
+// checked statistically against the closed-form exponential/HG/adaptive-
+// mis predictions on the cpu side. ported 1:1 from blender cycles'
+// volume_sample_channel / volume_sample_channel_pdf +
+// subsurface_random_walk_pdf (see openPbrSubsurfaceWalkStep's header
+// comment for the exact source files).
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-material-openpbr-tables.glsl"
+
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-subsurface.glsl"
+
+layout(buffer_reference, scalar) buffer WalkSampleBuffer {
+	uint outcome[];
+};
+layout(buffer_reference, scalar) buffer WalkDistanceBuffer {
+	float outDistance[];
+};
+layout(buffer_reference, scalar) buffer WalkWoBuffer {
+	vec3 outWo[];
+};
+layout(buffer_reference, scalar) buffer WalkWeightBuffer {
+	vec3 outWeight[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outcomeVa;
+	uint64_t distanceVa;
+	uint64_t woVa;
+	uint64_t weightVa;
+	uint sampleCount;
+	uint seedSalt;
+	vec3 sigmaAbsorption;
+	vec3 sigmaScattering;
+	float distanceMax;
+	vec3 wi;
+	float anisotropy;
+	vec3 throughput;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint sampleIndex = gl_GlobalInvocationID.x;
+	if (sampleIndex >= pc.sampleCount) {
+		return;
+	}
+
+	const uint h0 = fnPcgHash(sampleIndex + fnPcgHash(pc.seedSalt));
+	const uint h1 = fnPcgHash(h0);
+	u64 state = (u64(h0) << 32) | u64(h1);
+
+	float outDistance;
+	vec3 outWo;
+	vec3 outWeight;
+	const uint outcome = (
+		openPbrSubsurfaceWalkStep(
+			pc.sigmaAbsorption, pc.sigmaScattering, pc.distanceMax,
+			pc.wi, pc.anisotropy, pc.throughput,
+			outDistance, outWo, outWeight, state
+		)
+	);
+
+	WalkSampleBuffer(pc.outcomeVa).outcome[sampleIndex] = outcome;
+	WalkDistanceBuffer(pc.distanceVa).outDistance[sampleIndex] = outDistance;
+	WalkWoBuffer(pc.woVa).outWo[sampleIndex] = outWo;
+	WalkWeightBuffer(pc.weightVa).outWeight[sampleIndex] = outWeight;
+}

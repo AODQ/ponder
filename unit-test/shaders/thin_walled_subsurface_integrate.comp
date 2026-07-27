@@ -1,0 +1,108 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// hemispherical integrals of the thin-walled subsurface sheet, one thread
+// per config: the reflection albedo E_R, the transmission albedo E_T (which
+// must sum to S per the spec's energy statement), and the pdf's own
+// sphere normalization.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-diffuse.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+// per config, 8 floats in: wi.xyz, baseDiffuseRoughness,
+// subsurfaceScatterAnisotropy, subsurfaceColor.rgb. 8 floats out:
+// E_R.rgb, E_T.rgb, pdf sphere integral, unused. nor is fixed to (0,0,1)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+	uint thetaSteps;
+	uint phiSteps;
+} pc;
+
+layout(local_size_x = 16) in;
+
+void main() {
+	const u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) {
+		return;
+	}
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	const u32 base = i * 8u;
+	const f32v3 wi = (
+		f32v3(inBuf.data[base+0u], inBuf.data[base+1u], inBuf.data[base+2u])
+	);
+
+	OpenPbrMaterial mat;
+	mat.baseDiffuseRoughness = inBuf.data[base+3u];
+	mat.subsurfaceScatterAnisotropy = inBuf.data[base+4u];
+	mat.subsurfaceColor = (
+		f32v3(inBuf.data[base+5u], inBuf.data[base+6u], inBuf.data[base+7u])
+	);
+
+	const f32v3 nor = f32v3(0.0f, 0.0f, 1.0f);
+	// midpoint quadrature over the whole sphere; the upper/lower split is
+	// decided per sample by the sign of cos\theta
+	const f32 dTheta = PI / f32(pc.thetaSteps);
+	const f32 dPhi = TAU / f32(pc.phiSteps);
+	f32v3 albedoReflect = f32v3(0.0f);
+	f32v3 albedoTransmit = f32v3(0.0f);
+	f32 pdfIntegral = 0.0f;
+	for (u32 t = 0u; t < pc.thetaSteps; ++t) {
+		const f32 theta = (f32(t) + 0.5f) * dTheta;
+		const f32 cosTheta = cos(theta);
+		const f32 sinTheta = sin(theta);
+		for (u32 p = 0u; p < pc.phiSteps; ++p) {
+			const f32 phi = (f32(p) + 0.5f) * dPhi;
+			const f32v3 wo = (
+				f32v3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta)
+			);
+			const f32 solidAngle = sinTheta * dTheta * dPhi;
+			const f32v3 f = (
+				openPbrThinWalledSubsurfaceEvaluateF(mat, nor, wi, wo)
+			);
+			const f32v3 contribution = f * abs(cosTheta) * solidAngle;
+			if (cosTheta < 0.0f) {
+				albedoTransmit += contribution;
+			} else {
+				albedoReflect += contribution;
+			}
+			pdfIntegral += (
+				openPbrThinWalledSubsurfacePdf(
+					cosTheta, mat.subsurfaceScatterAnisotropy
+				)
+				* solidAngle
+			);
+		}
+	}
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	const u32 outBase = i * 8u;
+	outBuf.data[outBase+0u] = albedoReflect.x;
+	outBuf.data[outBase+1u] = albedoReflect.y;
+	outBuf.data[outBase+2u] = albedoReflect.z;
+	outBuf.data[outBase+3u] = albedoTransmit.x;
+	outBuf.data[outBase+4u] = albedoTransmit.y;
+	outBuf.data[outBase+5u] = albedoTransmit.z;
+	outBuf.data[outBase+6u] = pdfIntegral;
+	outBuf.data[outBase+7u] = 0.0f;
+}

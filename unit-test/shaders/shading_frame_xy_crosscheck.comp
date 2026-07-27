@@ -1,0 +1,47 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-shading-frame.glsl"
+#include "util-shading-frame-reference.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
+
+// per sample: f32v3(nor). output, 12 floats: mine.binormal(3),
+// mine.bitangent(3), ref.b1(3), ref.b2(3)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	const f32v3 nor = F32v3Buffer(pc.inVa).data[i];
+
+	f32v3 binormal, bitangent;
+	utilCalculateXy(nor, binormal, bitangent);
+
+	f32v3 b1, b2;
+	branchlessONB(nor, b1, b2);
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	u32 base = i * 12u;
+	outBuf.data[base+0u] = binormal.x; outBuf.data[base+1u] = binormal.y;
+	outBuf.data[base+2u] = binormal.z;
+	outBuf.data[base+3u] = bitangent.x; outBuf.data[base+4u] = bitangent.y;
+	outBuf.data[base+5u] = bitangent.z;
+	outBuf.data[base+6u] = b1.x; outBuf.data[base+7u] = b1.y;
+	outBuf.data[base+8u] = b1.z;
+	outBuf.data[base+9u] = b2.x; outBuf.data[base+10u] = b2.y;
+	outBuf.data[base+11u] = b2.z;
+}

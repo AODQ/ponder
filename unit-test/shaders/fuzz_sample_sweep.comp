@@ -1,0 +1,103 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// dense parameter-space sweep hunting for NaN/Inf and degenerate output in
+// the ported zeltner ltc fuzz sampler + pdf. one thread per (incidence x
+// fuzzA) texel, fuzzB held fixed per-dispatch (see pc.fuzzB); each texel
+// exercises an 8x8 xi grid that includes the exact 0 endpoint (the 1 - 2^-23
+// upper corner is skipped, matching ggx_bounded_sample_sweep.comp's
+// convention of carving boundary-flicker strata into their own test).
+// openPbrFuzzSampleWo takes xi directly, so the grid drives the sampler
+// with exact endpoint values.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-fuzz.glsl"
+
+// texel (x, y) maps to cosThetaI in [-1, 1] over x (below-horizon and
+// exact-antipodal wi included: utilFuzzFrame has a dedicated degenerate
+// fallback) and fuzzA in [1e-5, 3] over y; fuzzB is a fixed per-dispatch
+// constant. output 4 floats per texel: nonFiniteCount, maxUnitLengthError,
+// minPdf, maxPdf.
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint width;
+	uint height;
+	f32 fuzzB;
+} pc;
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	const u32v2 texel = gl_GlobalInvocationID.xy;
+	if (texel.x >= pc.width || texel.y >= pc.height) { return; }
+
+	const f32 cosThetaI = (
+		-1.0f + 2.0f * f32(texel.x) / f32(pc.width - 1u)
+	);
+	const f32 sinThetaI = sqrt(max(0.0f, 1.0f - cosThetaI * cosThetaI));
+	const f32v3 wi = f32v3(sinThetaI, 0.0f, cosThetaI);
+	const f32 fuzzA = (
+		1e-5f + 3.0f * f32(texel.y) / f32(pc.height - 1u)
+	);
+	const f32 fuzzB = pc.fuzzB;
+
+	const f32v3 nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	f32 nonFiniteCount = 0.0f;
+	f32 maxLenErr = 0.0f;
+	f32 minPdf = 1e30f;
+	f32 maxPdf = -1e30f;
+
+	const u32 kXiSteps = 8u;
+	for (u32 xj = 0u; xj < kXiSteps; ++xj) {
+		for (u32 xk = 0u; xk < kXiSteps; ++xk) {
+			const f32v2 xi = f32v2(
+				f32(xj) / f32(kXiSteps), f32(xk) / f32(kXiSteps)
+			);
+			const f32v3 wo = openPbrFuzzSampleWo(nor, wi, fuzzA, fuzzB, xi);
+			const f32 pdf = openPbrFuzzPdf(nor, wi, wo, fuzzA, fuzzB);
+
+			const bool finite = (
+				!isnan(wo.x) && !isnan(wo.y) && !isnan(wo.z)
+				&& !isinf(wo.x) && !isinf(wo.y) && !isinf(wo.z)
+				&& !isnan(pdf) && !isinf(pdf)
+			);
+			if (!finite) {
+				nonFiniteCount += 1.0f;
+				continue;
+			}
+			maxLenErr = max(maxLenErr, abs(length(wo) - 1.0f));
+			minPdf = min(minPdf, pdf);
+			maxPdf = max(maxPdf, pdf);
+		}
+	}
+
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	const u32 base = (texel.y * pc.width + texel.x) * 4u;
+	outBuf.data[base+0u] = nonFiniteCount;
+	outBuf.data[base+1u] = maxLenErr;
+	outBuf.data[base+2u] = minPdf;
+	outBuf.data[base+3u] = maxPdf;
+}

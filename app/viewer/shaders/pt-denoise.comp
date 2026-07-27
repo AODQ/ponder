@@ -1,0 +1,143 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+
+// variance-adaptive a-trous edge-avoiding spatial filter, ported from
+// ~/repo/demo/shaders/filter.comp. filters albedo-demodulated lighting
+// (not raw color) so texture detail survives; the final pass remultiplies
+// the center pixel's own albedo back in. no temporal reprojection needed --
+// pt-accumulate.comp's running mean is already the correct unbiased history
+// since ponder only accumulates with a static camera
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+
+#include "shared/global_pc.h"
+#include "pt-denoise-pc.h"
+#include "util-tonemap.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+const f32 kAlbedoEpsilon = 0.05f;
+
+void main() {
+	const GpuGlobalExtended unf = (
+		GpuGlobalExtendedBuffer(pc.global.extended).data
+	);
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 screensize = ivec2(unf.renderWidth, unf.renderHeight);
+	if (coord.x >= screensize.x || coord.y >= screensize.y) { return; }
+
+	const f32v4 posC = (
+		imageLoad(vkofImages[pc.denoise.gbufferPosHandle], coord)
+	);
+	const f32v4 norC = (
+		imageLoad(vkofImages[pc.denoise.gbufferNorHandle], coord)
+	);
+	const f32v3 albedoC = max(
+		imageLoad(vkofImages[pc.denoise.gbufferAlbedoHandle], coord).rgb,
+		f32v3(kAlbedoEpsilon)
+	);
+	const f32v4 colC = imageLoad(vkofImages[pc.denoise.inputHandle], coord);
+	const f32v3 lightC = (
+		pc.denoise.isFirstPass != 0u ? colC.rgb / albedoC : colC.rgb
+	);
+	// count is the real sample count pt-accumulate.comp tracked, so its
+	// reciprocal is a directly-founded variance proxy
+	const f32 count = (
+		imageLoad(vkofImages[pc.denoise.accumHandle], coord).a
+	);
+	const f32 variance = 1.0f / max(count, 1.0f);
+
+	const f32 sigmaL = 4.0f;
+	const f32 sigmaP = pc.denoise.positionSigma;
+	// loose enough that a smoothly curved surface still blends -- 128 only
+	// let near-identical normals through, starving curved geometry of any
+	// real averaging while flatter areas over-smoothed
+	const f32 sigmaN = 32.0f;
+
+	const int step = int(pc.denoise.stepSize);
+	// full 3x3, not a 5-tap cross -- a cross only samples 4 directions per
+	// pass, which isn't enough real averaging to knock down noise
+	const ivec2 offsets[9] = ivec2[](
+		ivec2(0, 0),
+		ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+		ivec2(1, 1), ivec2(1, -1), ivec2(-1, 1), ivec2(-1, -1)
+	);
+
+	f32v3 sumLight = f32v3(0.0f);
+	f32 sumWeight = 0.0f;
+	for (int i = 0; i < 9; ++i) {
+		const ivec2 npx = coord + offsets[i] * step;
+		if (
+			any(lessThan(npx, ivec2(0)))
+			|| any(greaterThanEqual(npx, screensize))
+		) {
+			continue;
+		}
+		const f32v4 posQ = (
+			imageLoad(vkofImages[pc.denoise.gbufferPosHandle], npx)
+		);
+		// never blend a background/geometry mismatch
+		if (posQ.w != posC.w) { continue; }
+		const f32v4 norQ = (
+			imageLoad(vkofImages[pc.denoise.gbufferNorHandle], npx)
+		);
+		const f32v4 colQ = imageLoad(vkofImages[pc.denoise.inputHandle], npx);
+		f32v3 lightQ = colQ.rgb;
+		if (pc.denoise.isFirstPass != 0u) {
+			const f32v3 albedoQ = max(
+				imageLoad(vkofImages[pc.denoise.gbufferAlbedoHandle], npx).rgb,
+				f32v3(kAlbedoEpsilon)
+			);
+			lightQ /= albedoQ;
+		}
+
+		const f32 lumC = dot(lightC, f32v3(0.2126f, 0.7152f, 0.0722f));
+		const f32 lumQ = dot(lightQ, f32v3(0.2126f, 0.7152f, 0.0722f));
+
+		const bool isSurface = posC.w > 0.5f;
+		const f32 wN = (
+			isSurface
+				? pow(max(dot(norC.xyz, norQ.xyz), 0.0f), sigmaN)
+				: 1.0f
+		);
+		const f32 wP = (
+			isSurface
+				? exp(-distance(posC.xyz, posQ.xyz) / (sigmaP + 1e-4f))
+				: 1.0f
+		);
+		// relative, not absolute: an HDR path tracer's luminance spans many
+		// orders of magnitude, so a fixed-unit sigma is either too tight in
+		// dim regions or too loose near bright ones
+		const f32 wL = (
+			exp(
+				-abs(lumC - lumQ)
+				/ (sigmaL * sqrt(variance) * max(lumC, 1e-2f) + 1e-4f)
+			)
+		);
+
+		const f32 w = wN * wP * wL;
+		sumLight += lightQ * w;
+		sumWeight += w;
+	}
+
+	const f32v3 outLight = sumLight / max(sumWeight, 1e-4f);
+
+	if (pc.denoise.isFinalPass != 0u) {
+		const f32v3 finalLinear = outLight * albedoC;
+		imageStore(
+			vkofImages[pc.denoise.outputHandle], coord,
+			f32v4(fnAces(finalLinear * pc.global.exposure), 1.0f)
+		);
+	} else {
+		imageStore(
+			vkofImages[pc.denoise.outputHandle], coord, f32v4(outLight, 1.0f)
+		);
+	}
+}

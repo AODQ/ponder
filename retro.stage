@@ -1,0 +1,317 @@
+{
+    "version": 1,
+    "name": "",
+    "description": "",
+    "metersPerUnit": 1.0,
+    "activeCamera": "",
+    "cameras": [],
+    "environment": {
+        "mode": "furnace",
+        "path": "/home/toad/repo/ponder/assets/environments/kloofendal_48d_partly_cloudy_puresky_4k.exr",
+        "rotationRadians": 0.0,
+        "intensity": 1.0
+    },
+    "lights": [],
+    "instances": [
+        {
+            "type": "gltf",
+            "name": "Barrel_Blue_1",
+            "path": "/home/toad/Downloads/models/retropsx/Barrel_Blue_1.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Barrel_Blue_2",
+            "path": "/home/toad/Downloads/models/retropsx/Barrel_Blue_2.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.2769014239311218,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Barrel_Grey",
+            "path": "/home/toad/Downloads/models/retropsx/Barrel_Grey.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.2913617193698883,
+                    0.0,
+                    0.26882824301719666
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Barrel_Red_2",
+            "path": "/home/toad/Downloads/models/retropsx/Barrel_Red_2.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.304043710231781
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Building_1",
+            "path": "/home/toad/Downloads/models/retropsx/Building_1.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    -1.085953950881958,
+                    2.066516399383545,
+                    -2.809255361557007
+                ],
+                "rotation": [
+                    1.0,
+                    0.0,
+                    0.0,
+                    4.371138828673793e-8
+                ],
+                "scale": [
+                    1.0,
+                    1.000008463859558,
+                    1.000008463859558
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Building_2",
+            "path": "/home/toad/Downloads/models/retropsx/Building_2.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    -5.8528337478637695,
+                    3.371058940887451,
+                    0.4904995560646057
+                ],
+                "rotation": [
+                    0.7071068286895752,
+                    0.0,
+                    0.0,
+                    0.7071067094802856
+                ],
+                "scale": [
+                    1.0,
+                    0.9999929070472717,
+                    0.9999929070472717
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Grey_Tires",
+            "path": "/home/toad/Downloads/models/retropsx/Grey_Tires.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    -2.004002332687378
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Industrial_Air_Conditioner_1",
+            "path": "/home/toad/Downloads/models/retropsx/Industrial_Air_Conditioner_1.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    -0.7283705472946167,
+                    1.4704818725585938,
+                    -0.21874886751174927
+                ],
+                "rotation": [
+                    0.5462660789489746,
+                    0.5713690519332886,
+                    -0.44701582193374634,
+                    0.4186975657939911
+                ],
+                "scale": [
+                    0.9999995827674866,
+                    1.0000004768371582,
+                    1.0000011920928955
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Road_Blocks_-_Red",
+            "path": "/home/toad/Downloads/models/retropsx/Road_Blocks_-_Red.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    -1.176993727684021,
+                    0.30607977509498596,
+                    0.1908876895904541
+                ],
+                "rotation": [
+                    0.5989931225776672,
+                    -0.37577882409095764,
+                    0.3757784962654114,
+                    0.5989891886711121
+                ],
+                "scale": [
+                    1.0,
+                    1.0000014305114746,
+                    1.0000026226043701
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Wall",
+            "path": "/home/toad/Downloads/models/retropsx/Wall.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    -1.6692187786102295,
+                    1.0296531915664673,
+                    0.018352746963500977
+                ],
+                "rotation": [
+                    0.5188170671463013,
+                    -0.4804477393627167,
+                    0.4804477393627167,
+                    0.5188148021697998
+                ],
+                "scale": [
+                    1.000000238418579,
+                    1.0000009536743164,
+                    1.0000019073486328
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Warehouse",
+            "path": "/home/toad/Downloads/models/retropsx/Warehouse.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    1.8637350797653198,
+                    3.8579940795898438,
+                    -7.376918315887451
+                ],
+                "rotation": [
+                    0.0,
+                    -0.4342964291572571,
+                    0.0,
+                    0.9007700085639954
+                ],
+                "scale": [
+                    0.9999998807907104,
+                    1.0,
+                    0.9999998807907104
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "White_Tires",
+            "path": "/home/toad/Downloads/models/retropsx/White_Tires.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.6271485686302185,
+                    1.1801950931549072,
+                    4.129819393157959
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    5.532897472381592,
+                    5.532897472381592,
+                    5.532897472381592
+                ]
+            },
+            "materialOverrides": []
+        }
+    ]
+}

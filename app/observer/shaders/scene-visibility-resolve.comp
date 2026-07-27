@@ -1,0 +1,190 @@
+#version 460
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 1) uniform uimage2D vkofImagesU[];
+layout(set = 0, binding = 2) uniform image2D vkofImages[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+layout(set = 0, binding = 4) uniform sampler3D vkofTextures3D[];
+
+#include "mor/mor-shared.h"
+#include "scene-visibility-resolve-pc.h"
+#include "util-mesh.glsl"
+#include "util-environment-map.glsl"
+#include "util-material-openpbr.glsl"
+#include "util-material-openpbr-load.glsl"
+#include "util-material-openpbr-ibl.glsl"
+#include "util-tonemap.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 screensize = (
+		ivec2(pc.global.renderWidth, pc.global.renderHeight)
+	);
+
+	if (coord.x >= screensize.x || coord.y >= screensize.y) {
+		return;
+	}
+
+	const uint vis = (
+		imageLoad(vkofImagesU[pc.resolve.visibilityImageHandle], coord).r
+	);
+	if (vis == 0u || vis == 0xFFFFFFFFu) {
+		vec3 background = vec3(0.0f);
+		if (pc.resolve.envRadianceHandle != 0u) {
+			const vec2 ndcXy = (
+				(vec2(coord) + 0.5f) / vec2(screensize) * 2.0f - 1.0f
+			);
+			const mat4 invViewProj = inverse(pc.global.viewProj);
+			const vec4 p0 = invViewProj * vec4(ndcXy, 0.0f, 1.0f);
+			const vec4 p1 = invViewProj * vec4(ndcXy, 1.0f, 1.0f);
+			const vec3 rayDir = normalize(p1.xyz / p1.w - p0.xyz / p0.w);
+			const EnvironmentMapHandles envHandles = (
+				EnvironmentMapHandles(pc.resolve.envRadianceHandle, 0u, 0u, 0u)
+			);
+			background = environmentMapRadiance(envHandles, rayDir, 0.0f);
+		}
+		imageStore(
+			vkofImages[pc.resolve.outputImageHandle],
+			coord,
+			vec4(fnAces(background * pc.global.exposure), 1.0f)
+		);
+		if (coord == pc.resolve.probePixel) {
+			GpuProbeResultBuffer(pc.resolve.probeResultVa).data = (
+				GpuProbeResult(-1, -1)
+			);
+		}
+		return;
+	}
+
+	const UtilMeshUnpacked texel = utilMeshUnpackTexel(vis);
+	UtilMeshAttributeData attrData = (
+		utilMeshDecodeAttributes(
+			texel, screensize,
+			/*unpackWorldOrigin=*/ true,
+			/*unpackNormal=*/ true,
+			/*unpackUv=*/ true,
+			/*unpackUvDerivatives=*/ true,
+			/*unpackMaterial=*/ true
+		)
+	);
+
+	if (coord == pc.resolve.probePixel) {
+		GpuProbeResultBuffer(pc.resolve.probeResultVa).data = (
+			GpuProbeResult(int(texel.modelId), int(attrData.materialIndex))
+		);
+	}
+
+	const mat3 tbn = (
+		utilCalculateTbnBasis(attrData.normal, attrData.tangent)
+	);
+
+	f32v3 geometryNormal = vec3(0.0f);
+	f32v4 geometryTangent = vec4(0.0f);
+	f32v3 geometryCoatNormal = vec3(0.0f);
+	f32v4 geometryCoatTangent = vec4(0.0f);
+	const OpenPbrMaterial material = (
+		openPbrLoadMaterialDeriv(
+			attrData.materialBuf,
+			attrData.materialIndex,
+			attrData.uvTransforms,
+			attrData.uv,
+			attrData.uvDx,
+			attrData.uvDy,
+			geometryNormal,
+			geometryTangent,
+			geometryCoatNormal,
+			geometryCoatTangent
+		)
+	);
+
+	const ShadingFrame frame = (
+		shadingFrameFromTangent(
+			utilShadingNormalOrGeometric(
+				tbn * geometryNormal, attrData.normalGeometrical
+			),
+			attrData.tangent.xyz
+		)
+	);
+	const ShadingFrame coatFrame = (
+		shadingFrameFromTangent(
+			utilShadingNormalOrGeometric(
+				tbn * geometryCoatNormal, attrData.normalGeometrical
+			),
+			attrData.tangent.xyz
+		)
+	);
+
+	const f32v3 wi = normalize(pc.global.cameraPos - attrData.origin);
+	const MaterialTableHandles tables = (
+		MaterialTableHandles(
+			pc.resolve.kullaContyEnergyHandle, pc.resolve.zeltnerLtcParamHandle
+		)
+	);
+	// lit purely by the environment; the env map's own sun is already in the
+	// prefiltered ibl, so there is no analytic directional term to add
+	f32v3 color = vec3(0.0f);
+
+	if (pc.resolve.envIblIrradianceHandle != 0u) {
+		const f32 dotNorWi = max(dot(frame.nor, wi), 0.0f);
+		const f32 dotCoatNorWi = max(dot(coatFrame.nor, wi), 0.0f);
+		const f32 roughenedSpecularRoughness = (
+			openPbrCoatRoughenedRoughness(
+				material.specularRoughness, material.coatRoughness,
+				material.coatWeight
+			)
+		);
+
+		const f32v3 irradiance = (
+			textureLod(
+				vkofTextures[pc.resolve.envIblIrradianceHandle],
+				environmentMapDirToUv(frame.nor, 0.0f),
+				0.0f
+			).rgb
+		);
+		const f32v3 reflectBase = reflect(-wi, frame.nor);
+		const f32v3 prefilteredSpecularBase = (
+			textureLod(
+				vkofTextures[pc.resolve.envIblSpecularHandle],
+				environmentMapDirToUv(reflectBase, 0.0f),
+				roughenedSpecularRoughness * pc.resolve.envIblSpecularMaxLod
+			).rgb
+		);
+		const f32v3 reflectCoat = reflect(-wi, coatFrame.nor);
+		const f32v3 prefilteredSpecularCoat = (
+			textureLod(
+				vkofTextures[pc.resolve.envIblSpecularHandle],
+				environmentMapDirToUv(reflectCoat, 0.0f),
+				material.coatRoughness * pc.resolve.envIblSpecularMaxLod
+			).rgb
+		);
+
+		color += (
+			openPbrIblEvaluateF(
+				tables,
+				material,
+				dotNorWi,
+				dotCoatNorWi,
+				irradiance,
+				prefilteredSpecularBase,
+				prefilteredSpecularCoat,
+				/*isInsideMedium=*/ false
+			)
+		);
+	}
+
+	imageStore(
+		vkofImages[pc.resolve.outputImageHandle],
+		coord,
+		vec4(fnAces(color * pc.global.exposure), 1.0f)
+	);
+}

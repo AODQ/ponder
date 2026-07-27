@@ -1,0 +1,60 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// numerical-robustness sweep for utilVdbPhaseSampleDraineCos's cubic-root
+// inversion (jendersie & d'eon 2023): the closed-form solve involves large
+// cancelling terms (432*T1a^3 + T2 + ...) that can lose precision or go
+// non-finite for some (xi, g, alpha) combinations even though the analytic
+// formula is exact. one thread per grid cell over xi x g x alpha; alpha
+// range covers up to the fitted fog values (utilVdbPhaseFogDefaultParams
+// reaches alpha ~27 around a 20 micron droplet diameter).
+
+#define PI 3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-vdb.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint xiCount;
+	uint gCount;
+	uint alphaCount;
+	f32 gMin;
+	f32 gMax;
+	f32 alphaMin;
+	f32 alphaMax;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+void main() {
+	const uint xiIndex = gl_GlobalInvocationID.x;
+	const uint gIndex = gl_GlobalInvocationID.y;
+	const uint alphaIndex = gl_GlobalInvocationID.z;
+	if (xiIndex >= pc.xiCount || gIndex >= pc.gCount || alphaIndex >= pc.alphaCount) {
+		return;
+	}
+
+	// avoid exactly 0/1 (degenerate endpoints) and exactly g=0 (the sampler's
+	// own division by g there is a separate, already-guarded isotropic path)
+	const f32 xi = (f32(xiIndex) + 0.5f) / f32(pc.xiCount);
+	const f32 g = mix(pc.gMin, pc.gMax, (f32(gIndex) + 0.5f) / f32(pc.gCount));
+	const f32 alpha = (
+		mix(pc.alphaMin, pc.alphaMax, (f32(alphaIndex) + 0.5f) / f32(pc.alphaCount))
+	);
+
+	const f32 cosTheta = utilVdbPhaseSampleDraineCos(xi, g, alpha);
+
+	const uint index = (
+		(alphaIndex * pc.gCount + gIndex) * pc.xiCount + xiIndex
+	);
+	F32Buffer(pc.outVa).data[index] = cosTheta;
+}

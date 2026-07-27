@@ -1,0 +1,39 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	float data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t dstVa;
+	uint bluenoiseHandle;
+	uint count;
+} pc;
+
+layout(local_size_x = 1) in;
+
+// single invocation (pixel 0,0): writes `count` sequential pcg32 samples
+// from one stream. tests temporal/chain uniformity for one pixel, as
+// opposed to noise_generate_seeds.comp's spatial (one-sample-per-pixel-
+// across-many-pixels) uniformity.
+void main() {
+	u64 state, state2;
+	f32 seed;
+	f32v2 seed2;
+	utilGenerateSeeds(state, state2, seed, seed2, 0u, 0u, pc.bluenoiseHandle);
+
+	F32Buffer buf = F32Buffer(pc.dstVa);
+	for (u32 i = 0u; i < pc.count; ++i) {
+		buf.data[i] = seed;
+		seed = fnSampleUniform(state);
+	}
+}

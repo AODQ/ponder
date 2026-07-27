@@ -1,0 +1,101 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the lobe-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-metallic.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
+
+// furnace test: numerically integrates the conductor lobe over the wo
+// hemisphere for a FIXED wi (incident direction), under constant unit
+// illumination. the conductor's fresnel (F82, evaluated at dot(nor, wi))
+// and its turquin compensation factor (also a function of dot(nor, wi)
+// only) are both constant across this integral, so they factor out:
+//   integral_wo [F82(muI) * D * V * comp(muI)] cos dwo
+//     = F82(muI) * comp(muI) * E_actual(muI)
+// with comp = 1 + fAvg (1-E_fit)/E_fit; to the extent E_fit tracks
+// E_actual this reduces to F82(muI) * (E + fAvg (1-E)), which for a fully
+// white metal (baseWeight=baseColor=1 -> f0=1 -> F82=1, fAvg=1) is exactly
+// 1: the turquin compensation's entire purpose. note this furnace fixes
+// wi, unlike the glossy-diffuse layer furnace which fixes wo -- each
+// lobe's identity factors on the side its albedo terms are evaluated at.
+//
+// per sample, 8 floats: muI (fixed incident cosine), specularRoughness,
+// specularRoughnessAnisotropy, baseWeight, baseColorScalar,
+// specularWeight, specularColorScalar, unused
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint thetaSteps;
+	uint phiSteps;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	F32Buffer inBuf = F32Buffer(pc.inVa);
+	u32 base = i * 8u;
+	const f32 muI = inBuf.data[base+0u];
+
+	OpenPbrMaterial mat;
+	mat.specularRoughness = inBuf.data[base+1u];
+	mat.specularRoughnessAnisotropy = inBuf.data[base+2u];
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.baseWeight = inBuf.data[base+3u];
+	mat.baseColor = f32v3(inBuf.data[base+4u]);
+	mat.specularWeight = inBuf.data[base+5u];
+	mat.specularColor = f32v3(inBuf.data[base+6u]);
+	mat.coatWeight = 0.0f;
+	mat.coatRoughness = 0.0f;
+	mat.thinFilmWeight = 0.0f;
+
+	ShadingFrame frame;
+	frame.tanX = f32v3(1.0f, 0.0f, 0.0f);
+	frame.tanY = f32v3(0.0f, 1.0f, 0.0f);
+	frame.nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	const f32v3 wi = f32v3(sqrt(max(0.0f, 1.0f - muI * muI)), 0.0f, muI);
+
+	const f32 dTheta = (PI * 0.5f) / f32(pc.thetaSteps);
+	const f32 dPhi = (2.0f * PI) / f32(pc.phiSteps);
+
+	f32 sum = 0.0f;
+	for (uint ti = 0u; ti < pc.thetaSteps; ++ti) {
+		const f32 theta = (f32(ti) + 0.5f) * dTheta;
+		const f32 cosThetaO = cos(theta);
+		const f32 sinThetaO = sin(theta);
+		for (uint pi = 0u; pi < pc.phiSteps; ++pi) {
+			const f32 phi = (f32(pi) + 0.5f) * dPhi;
+			const f32v3 wo = (
+				f32v3(sinThetaO * cos(phi), sinThetaO * sin(phi), cosThetaO)
+			);
+			const f32v3 f = openPbrFresnelMetallicEvaluateF(mat, frame, wi, wo);
+			sum += f.x * cosThetaO * sinThetaO * dTheta * dPhi;
+		}
+	}
+	F32Buffer(pc.outVa).data[i] = sum;
+}

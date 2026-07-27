@@ -1,0 +1,377 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "util-random.glsl"
+
+#include "util-material-openpbr.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+layout(buffer_reference, scalar) buffer F32v3Buffer {
+	f32v3 data[];
+};
+layout(buffer_reference, scalar) buffer U32Buffer {
+	u32 data[];
+};
+
+// per-instance geometry + material record, uploaded by the test. layout
+// must match InstanceRecord in test-dielectric-scenes.cpp (scalar packing)
+struct InstanceRecord {
+	uint64_t vertexVa;
+	uint64_t indexVa;
+	f32v3 baseColor;
+	f32 specularWeight;
+	f32v3 emission;
+	f32 specularRoughness;
+	f32v3 transmissionColor;
+	f32 transmissionWeight;
+	// for a transmissive record: the absolute ior of the medium interior to
+	// this closed surface. for an opaque record: the plain specular ior
+	f32 ior;
+	u32 flags;
+	f32 baseMetalness;
+	f32 pad;
+};
+layout(buffer_reference, scalar) buffer InstanceRecordBuffer {
+	InstanceRecord data[];
+};
+
+// analytic sphere normal from the instance transform's translation column
+// instead of the faceted triangle normal
+const u32 skFlagSphere = 1u;
+// procedural checkerboard albedo from the world-space hit position
+const u32 skFlagChecker = 2u;
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t outVa;
+	uint64_t sceneVa;
+	uint64_t primaryHitVa;
+	uint width;
+	uint height;
+	// this dispatch renders samples [sampleOffset, sampleOffset+sampleCount)
+	// and adds their radiance sum into outVa (writes on sampleOffset == 0);
+	// the cpu divides by the total sample count after the last chunk
+	uint sampleOffset;
+	uint sampleCount;
+	uint bounceCount;
+	uint kullaContyHandle;
+	uint skyEnable;
+	f32v3 camOrigin;
+	f32v3 camRight;
+	f32v3 camUp;
+	f32v3 camForward;
+	f32 tanHalfFovX;
+	f32 tanHalfFovY;
+} pc;
+
+// nested dielectric media are tracked as a stack of absolute iors; 4 levels
+// is plenty for the two-deep sphere nestings these tests build
+const u32 skMediumStackMax = 4u;
+
+// 0.25-world-unit checker cells, offset by half a cell so the wall center
+// and the through-center validation ray of the hollow-sphere test land
+// mid-cell, never on a cell edge. must match checker_parity in
+// test-dielectric-scenes.cpp
+f32v3 checker_color(const f32v3 base, const f32v3 pos) {
+	const int parity = (
+		int(floor(pos.x * 4.0f + 0.5f))
+		+ int(floor(pos.y * 4.0f + 0.5f))
+		+ int(floor(pos.z * 4.0f + 0.5f))
+	);
+	return ((parity & 1) == 0) ? base : f32v3(0.04f);
+}
+
+// simple gradient sky + soft sun glow for the open bouncing-spheres scene;
+// the sun direction has -z so the field seen by the +z-looking camera is
+// front-lit. deliberately broad (pow 64) so bsdf-only sampling converges
+f32v3 sky_radiance(const f32v3 dir) {
+	const f32v3 horizon = f32v3(0.90f, 0.94f, 1.00f);
+	const f32v3 zenith = f32v3(0.25f, 0.45f, 0.85f);
+	const f32v3 ground = f32v3(0.35f, 0.33f, 0.30f);
+	const f32v3 sky = (
+		dir.y < 0.0f
+		? ground
+		: mix(horizon, zenith, clamp(dir.y, 0.0f, 1.0f))
+	);
+	const f32v3 sunDir = normalize(f32v3(0.45f, 0.65f, -0.35f));
+	const f32 glow = pow(max(dot(dir, sunDir), 0.0f), 64.0f);
+	return sky + glow * f32v3(6.0f, 5.6f, 5.0f);
+}
+
+OpenPbrMaterial material_from_record(
+	const InstanceRecord rec,
+	const f32v3 baseColor,
+	const f32 specularIor
+) {
+	OpenPbrMaterial mat;
+	mat.baseWeight = 1.0f;
+	mat.baseColor = baseColor;
+	mat.baseMetalness = rec.baseMetalness;
+	mat.baseDiffuseRoughness = 0.0f;
+	mat.specularWeight = rec.specularWeight;
+	mat.specularColor = f32v3(1.0f);
+	mat.specularRoughness = rec.specularRoughness;
+	mat.specularRoughnessAnisotropy = 0.0f;
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.specularIor = specularIor;
+	mat.transmissionWeight = rec.transmissionWeight;
+	mat.transmissionColor = rec.transmissionColor;
+	mat.transmissionDepth = 0.0f;
+	mat.transmissionScatter = f32v3(0.0f);
+	mat.transmissionScatterAnisotropy = 0.0f;
+	mat.transmissionDispersionScale = 0.0f;
+	mat.transmissionDispersionAbbeNumber = 20.0f;
+	mat.subsurfaceWeight = 0.0f;
+	mat.subsurfaceColor = f32v3(0.8f);
+	mat.subsurfaceRadius = 1.0f;
+	mat.subsurfaceRadiusScale = f32v3(1.0f);
+	mat.subsurfaceScatterAnisotropy = 0.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatColor = f32v3(1.0f);
+	mat.coatRoughness = 0.0f;
+	mat.coatRoughnessAnisotropy = 0.0f;
+	mat.coatIor = 1.6f;
+	mat.coatDarkening = 1.0f;
+	mat.fuzzWeight = 0.0f;
+	mat.fuzzColor = f32v3(1.0f);
+	mat.fuzzRoughness = 0.5f;
+	mat.emissionLuminance = 0.0f;
+	mat.emissionColor = f32v3(0.0f);
+	mat.thinFilmWeight = 0.0f;
+	mat.thinFilmThickness = 0.5f;
+	mat.thinFilmIor = 1.4f;
+	mat.geometryOpacity = 1.0f;
+	mat.geometryThinWalled = 0.0f;
+	return mat;
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	uint px = gl_GlobalInvocationID.x;
+	uint py = gl_GlobalInvocationID.y;
+	if (px >= pc.width || py >= pc.height) { return; }
+	uint pixel = py * pc.width + px;
+
+	MaterialTableHandles tables;
+	tables.kullaContyEnergy = pc.kullaContyHandle;
+	tables.zeltnerLtcParam = 0u;
+
+	InstanceRecordBuffer scene = InstanceRecordBuffer(pc.sceneVa);
+	U32Buffer primaryHit = U32Buffer(pc.primaryHitVa);
+
+	// deterministic primary rays; image row 0 is the top
+	f32 ndcX = (2.0f * (f32(px) + 0.5f) / f32(pc.width) - 1.0f);
+	f32 ndcY = (2.0f * (f32(py) + 0.5f) / f32(pc.height) - 1.0f);
+	f32v3 primaryDir = normalize(
+		pc.camForward
+		+ pc.camRight * (ndcX * pc.tanHalfFovX)
+		+ pc.camUp * (-ndcY * pc.tanHalfFovY)
+	);
+
+	f32v3 radianceSum = f32v3(0.0f);
+
+	for (uint s = 0u; s < pc.sampleCount; ++s) {
+		uint sampleIndex = pc.sampleOffset + s;
+		const u32 h0 = fnPcgHash(pixel * 9781u + sampleIndex + 1u);
+		const u32 h1 = fnPcgHash(h0);
+		u64 state = (u64(h0) << 32) | u64(h1);
+
+		f32v3 origin = pc.camOrigin;
+		f32v3 dir = primaryDir;
+		f32v3 throughput = f32v3(1.0f);
+
+		// stack of absolute iors of the media enclosing the current ray
+		// origin; media[0] is the exterior (vacuum/air)
+		f32 media[skMediumStackMax];
+		media[0] = 1.0f;
+		uint depth = 0u;
+
+		for (uint bounce = 0u; bounce < pc.bounceCount; ++bounce) {
+			rayQueryEXT rq;
+			rayQueryInitializeEXT(
+				/*rayQuery=*/rq,
+				/*topLevel=*/vkofTlas,
+				/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+				/*cullMask=*/0xFF,
+				/*origin=*/origin,
+				// tMin is zero: self-intersection is prevented by the
+				// origin offset along the normal; a positive tMin tunnels
+				// through adjacent walls at corners (see test-cornell.cpp)
+				/*tMin=*/0.0f,
+				/*direction=*/dir,
+				/*tMax=*/1000.0f
+			);
+			while (rayQueryProceedEXT(rq)) { }
+
+			bool hit = (
+				rayQueryGetIntersectionTypeEXT(
+					/*rayQuery=*/rq, /*committed=*/true
+				)
+				!= gl_RayQueryCommittedIntersectionNoneEXT
+			);
+			if (!hit) {
+				if (bounce == 0u && sampleIndex == 0u) {
+					primaryHit.data[pixel] = 0xFFFFFFFFu;
+				}
+				if (pc.skyEnable != 0u) {
+					radianceSum += throughput * sky_radiance(dir);
+				}
+				break;
+			}
+
+			f32 t = rayQueryGetIntersectionTEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+			uint inst = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			));
+			mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(
+				/*rayQuery=*/rq, /*committed=*/true
+			);
+			if (bounce == 0u && sampleIndex == 0u) {
+				primaryHit.data[pixel] = inst;
+			}
+
+			InstanceRecord rec = scene.data[inst];
+			f32v3 hitPos = origin + t * dir;
+
+			// authored front-facing normal: analytic outward normal for
+			// spheres (smooth shading, exact enter/exit classification),
+			// geometric triangle normal otherwise. instance transforms for
+			// spheres are uniform scale + translation, so the world-space
+			// sphere center is the transform's translation column
+			f32v3 nGeom;
+			if ((rec.flags & skFlagSphere) != 0u) {
+				const f32v3 center = objectToWorld[3];
+				nGeom = normalize(hitPos - center);
+			} else {
+				U32Buffer indices = U32Buffer(rec.indexVa);
+				F32v3Buffer verts = F32v3Buffer(rec.vertexVa);
+				f32v3 p0 = verts.data[indices.data[3u * prim + 0u]];
+				f32v3 p1 = verts.data[indices.data[3u * prim + 1u]];
+				f32v3 p2 = verts.data[indices.data[3u * prim + 2u]];
+				nGeom = normalize(
+					mat3(objectToWorld) * cross(p1 - p0, p2 - p0)
+				);
+			}
+			const bool frontFace = dot(nGeom, dir) < 0.0f;
+			f32v3 n = frontFace ? nGeom : -nGeom;
+
+			// one-sided emitter: only the winding front face emits
+			if (frontFace) {
+				radianceSum += throughput * rec.emission;
+			}
+
+			// interface ior for this hit. the openpbr transmission api
+			// models a medium/vacuum boundary via (isInsideMedium,
+			// dispersedIor); a dielectric interface depends only on the
+			// relative ior, so a nested-media interface (current medium
+			// ior -> ior of the medium on the other side) maps exactly
+			// onto it: relEta >= 1 plays as entering a medium of ior
+			// relEta, relEta < 1 as exiting a medium of ior 1/relEta
+			f32 matIor = rec.ior;
+			bool insideFlag = false;
+			if (rec.transmissionWeight > 0.0f) {
+				const f32 currentIor = media[depth];
+				const f32 otherIor = (
+					frontFace
+					? rec.ior
+					: (depth > 0u ? media[depth - 1u] : 1.0f)
+				);
+				const f32 relEta = otherIor / currentIor;
+				if (relEta >= 1.0f) {
+					matIor = relEta;
+					insideFlag = false;
+				} else {
+					matIor = 1.0f / relEta;
+					insideFlag = true;
+				}
+			}
+
+			const f32v3 baseColor = (
+				(rec.flags & skFlagChecker) != 0u
+				? checker_color(rec.baseColor, hitPos)
+				: rec.baseColor
+			);
+			OpenPbrMaterial mat = material_from_record(rec, baseColor, matIor);
+			ShadingFrame frame = shadingFrameFromNormal(n);
+			f32v3 wi = -dir;
+
+			f32 pdf;
+			bool sampledTransmission;
+			bool sampledSubsurfaceEntry;
+			uint pickedLobe;
+			f32v3 wo = openPbrSampleWo(
+				tables,
+				frame,
+				frame,
+				wi,
+				mat,
+				pdf,
+				sampledTransmission,
+				sampledSubsurfaceEntry,
+				pickedLobe,
+				state,
+				insideFlag,
+				matIor
+			);
+			if (pdf <= 0.0f) { break; }
+
+			f32v3 f = openPbrEvaluateF(
+				tables,
+				frame,
+				frame,
+				wi,
+				wo,
+				mat,
+				insideFlag,
+				matIor
+			);
+			throughput *= f * abs(dot(n, wo)) / pdf;
+			if (all(equal(throughput, f32v3(0.0f)))) { break; }
+
+			// a transmitted sample crosses this closed surface: entering
+			// pushes the surface's interior medium, exiting pops back out
+			if (sampledTransmission) {
+				if (frontFace) {
+					if (depth + 1u < skMediumStackMax) {
+						depth++;
+						media[depth] = rec.ior;
+					}
+				} else if (depth > 0u) {
+					depth--;
+				}
+			}
+
+			dir = wo;
+			origin = (
+				hitPos + n * (sampledTransmission ? -0.001f : 0.001f)
+			);
+		}
+	}
+
+	uint pixelCount = pc.width * pc.height;
+	F32Buffer outBuf = F32Buffer(pc.outVa);
+	if (pc.sampleOffset == 0u) {
+		outBuf.data[pixel] = radianceSum.r;
+		outBuf.data[pixelCount + pixel] = radianceSum.g;
+		outBuf.data[2u * pixelCount + pixel] = radianceSum.b;
+	} else {
+		outBuf.data[pixel] += radianceSum.r;
+		outBuf.data[pixelCount + pixel] += radianceSum.g;
+		outBuf.data[2u * pixelCount + pixel] += radianceSum.b;
+	}
+}

@@ -1,0 +1,8 @@
+.cache/
+build/
+install/
+#unit-test/output/
+# glTF sample assets copied from cull (1.4GB); local-only, not meant for
+# git history -- re-copy from cull/assets if this directory is missing
+/assets/
+screenshots/

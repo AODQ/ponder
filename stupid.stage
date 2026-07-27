@@ -1,0 +1,388 @@
+{
+    "version": 1,
+    "name": "",
+    "description": "",
+    "metersPerUnit": 1.0,
+    "activeCamera": "",
+    "cameras": [],
+    "environment": {
+        "mode": "furnace",
+        "path": "/home/toad/repo/ponder/assets/environments/docklands_02_2k.exr",
+        "rotationRadians": 0.0,
+        "intensity": 1.0
+    },
+    "lights": [],
+    "instances": [
+        {
+            "type": "gltf",
+            "name": "apocalyptic_city",
+            "path": "/home/toad/Downloads/models/apocalyptic_city.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "materialOverrides": [
+                {
+                    "material": "Material__1278",
+                    "fields": {
+                        "geometryOpacity": {
+                            "value": 0.0,
+                            "texturePath": ""
+                        }
+                    }
+                },
+                {
+                    "material": "Material__1277",
+                    "fields": {}
+                }
+            ]
+        },
+        {
+            "type": "gltf",
+            "name": "BrainStem",
+            "path": "/home/toad/repo/ponder/assets/Models/BrainStem/glTF/BrainStem.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    -0.3305690884590149,
+                    0.025004489347338676,
+                    0.7429118156433105,
+                    0.5815331935882568
+                ],
+                "scale": [
+                    7.097343,
+                    7.097343,
+                    7.097343
+                ]
+            },
+            "materialOverrides": [
+                {
+                    "material": "coverStem-effect",
+                    "fields": {
+                        "specularRoughness": {
+                            "value": 0.0,
+                            "texturePath": ""
+                        },
+                        "baseWeight": {
+                            "value": 0.8389999866485596,
+                            "texturePath": ""
+                        }
+                    }
+                },
+                {
+                    "material": "headFilletStem-effect",
+                    "fields": {
+                        "specularRoughness": {
+                            "value": 0.0,
+                            "texturePath": ""
+                        },
+                        "baseMetalness": {
+                            "value": 0.0,
+                            "texturePath": ""
+                        }
+                    }
+                },
+                {
+                    "material": "frameInStem-effect",
+                    "fields": {
+                        "specularRoughness": {
+                            "value": 0.0,
+                            "texturePath": ""
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "gltf",
+            "name": "CarConcept",
+            "path": "/home/toad/repo/ponder/assets/Models/CarConcept/glTF/CarConcept.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    -0.3251456618309021,
+                    0.5106471180915833,
+                    0.7851764559745789,
+                    0.13045211136341095
+                ],
+                "scale": [
+                    3.806168,
+                    3.806168,
+                    3.806168
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "CesiumMilkTruck",
+            "path": "/home/toad/repo/ponder/assets/Models/CesiumMilkTruck/glTF-Binary/CesiumMilkTruck.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.5287954211235046,
+                    0.0,
+                    0.0,
+                    0.8487493395805359
+                ],
+                "scale": [
+                    2.205896,
+                    2.205896,
+                    2.205896
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "Duck",
+            "path": "/home/toad/repo/ponder/assets/Models/Duck/glTF/Duck.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.35615572333335876,
+                    0.0,
+                    0.0,
+                    0.9344266057014465
+                ],
+                "scale": [
+                    6.702384,
+                    6.702384,
+                    6.702384
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "FlightHelmet",
+            "path": "/home/toad/repo/ponder/assets/Models/FlightHelmet/glTF/FlightHelmet.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.2777005136013031,
+                    -0.16438379883766174,
+                    0.4666840434074402,
+                    0.8234478831291199
+                ],
+                "scale": [
+                    19.158475,
+                    19.158475,
+                    19.158475
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "GlamVelvetSofa",
+            "path": "/home/toad/repo/ponder/assets/Models/GlamVelvetSofa/glTF/GlamVelvetSofa.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.3658737540245056,
+                    -0.16729435324668884,
+                    0.3807014524936676,
+                    0.8325955867767334
+                ],
+                "scale": [
+                    5.122592,
+                    5.122592,
+                    5.122592
+                ]
+            },
+            "materialOverrides": [
+                {
+                    "material": "GlamVelvetSofa_fabric_navy",
+                    "fields": {
+                        "specularColor": {
+                            "value": [
+                                1.0,
+                                0.0,
+                                0.0
+                            ],
+                            "texturePath": ""
+                        },
+                        "specularRoughness": {
+                            "value": 1.0,
+                            "texturePath": ""
+                        },
+                        "fuzzWeight": {
+                            "value": 0.2709999978542328,
+                            "texturePath": ""
+                        },
+                        "fuzzColor": {
+                            "value": [
+                                0.14000000059604645,
+                                0.039000000804662704,
+                                0.7839999794960022
+                            ],
+                            "texturePath": ""
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "gltf",
+            "name": "IridescenceAbalone",
+            "path": "/home/toad/repo/ponder/assets/Models/IridescenceAbalone/glTF-Binary/IridescenceAbalone.glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.4141148626804352,
+                    -0.03501174971461296,
+                    -0.07385101169347763,
+                    0.9065479040145874
+                ],
+                "scale": [
+                    60.116064,
+                    60.116064,
+                    60.116064
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "oil_tin_4k",
+            "path": "/home/toad/Downloads/models/oiltin/oil_tin_4k.gltf",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.3633706867694855,
+                    -0.6613855361938477,
+                    0.2764647901058197,
+                    0.5950615406036377
+                ],
+                "scale": [
+                    33.80415,
+                    33.80415,
+                    33.80415
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "gltf",
+            "name": "doom3player (1)",
+            "path": "/home/toad/Downloads/models/doom3player (1).glb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    0.3009880781173706,
+                    -0.4578271806240082,
+                    0.4914476275444031,
+                    0.6769635677337646
+                ],
+                "scale": [
+                    0.183113,
+                    0.183113,
+                    0.183113
+                ]
+            },
+            "materialOverrides": []
+        },
+        {
+            "type": "vdb",
+            "name": "tornado_0078",
+            "path": "/home/toad/repo/ponder/assets/vdb/tornado_0078.vdb",
+            "visible": true,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                   0.0 
+                ],
+                "rotation": [
+                    -0.7071068286895752,
+                    0.0,
+                    0.0,
+                    0.7071067094802856
+                ],
+                "scale": [
+                    0.2,
+                    0.2,
+                    0.2
+                ]
+            },
+            "blobs": [
+                {
+                    "grid": "density",
+                    "sigmaAbsorption": [
+                        1.059999942779541,
+                        0.8999999761581421,
+                        0.7799999713897705
+                    ],
+                    "sigmaScattering": [
+                        0.5799999833106995,
+                        0.8199999928474426,
+                        1.1299999952316284
+                    ],
+                    "dropletDiameter": 25.0,
+                    "phaseAnisotropyOverride": -2.0
+                }
+            ]
+        }
+    ]
+}

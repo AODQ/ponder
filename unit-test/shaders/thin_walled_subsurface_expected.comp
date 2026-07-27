@@ -1,0 +1,74 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// expected side of the openPbrThinWalledSubsurfaceSampleWo vs
+// openPbrThinWalledSubsurfacePdf chi-square: one thread per bin,
+// numerically integrates the pdf over the bin's solid angle around pc.nor.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-random.glsl"
+#include "util-material-openpbr-tables.glsl"
+
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+const float skFon1 = 0.5f - 2.0f / (3.0f * PI);
+const float skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-thinfilm.glsl"
+#include "util-material-openpbr-microfacet.glsl"
+#include "util-material-openpbr-diffuse.glsl"
+#include "util-sampling-bins.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t expectedVa;
+	uint sampleCount;
+	uint seedSalt;
+	vec3 nor;
+	float anisotropy;
+} pc;
+
+layout(local_size_x = 256) in;
+
+void main() {
+	const uint bin = gl_GlobalInvocationID.x;
+	if (bin >= BSDF_VERIFY_BIN_COUNT) {
+		return;
+	}
+
+	const uint thetaBin = bin / BSDF_VERIFY_PHI_BINS;
+	const uint phiBin = bin % BSDF_VERIFY_PHI_BINS;
+	const float theta0 = PI * float(thetaBin) / float(BSDF_VERIFY_THETA_BINS);
+	const float theta1 = PI * float(thetaBin + 1u) / float(BSDF_VERIFY_THETA_BINS);
+	const float phi0 = TAU * float(phiBin) / float(BSDF_VERIFY_PHI_BINS);
+	const float phi1 = TAU * float(phiBin + 1u) / float(BSDF_VERIFY_PHI_BINS);
+
+	const uint subGrid = 32u;
+	float integral = 0.0f;
+	for (uint j = 0u; j < subGrid; ++j) {
+		const float theta = mix(theta0, theta1, (float(j) + 0.5f) / float(subGrid));
+		const float sinTheta = sin(theta);
+		for (uint k = 0u; k < subGrid; ++k) {
+			const float phi = mix(phi0, phi1, (float(k) + 0.5f) / float(subGrid));
+			const vec3 dir = bsdfVerifyDirectionFromAngles(pc.nor, theta, phi);
+			const float pdfVal = (
+				openPbrThinWalledSubsurfacePdf(dot(pc.nor, dir), pc.anisotropy)
+			);
+			integral += pdfVal * sinTheta;
+		}
+	}
+	integral *= (
+		(theta1 - theta0) * (phi1 - phi0)
+		/ float(subGrid * subGrid)
+	);
+
+	F32Buffer(pc.expectedVa).data[bin] = integral * float(pc.sampleCount);
+}

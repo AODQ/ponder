@@ -1,0 +1,57 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// evaluate shader for openPbrSubsurfaceAlbedoToSigma
+// (util-material-openpbr-subsurface.glsl): the diffusion-inversion that
+// turns openpbr's user-facing (subsurfaceColor, subsurfaceRadius *
+// subsurfaceRadiusScale, subsurfaceScatterAnisotropy) into the
+// (sigmaAbsorption, sigmaScattering) pair a random walk integrates with.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-material-openpbr-tables.glsl"
+
+#define IPI 0.31830988618379067154
+#define PI  3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+#include "util-material-openpbr-shared.h"
+#include "util-material-openpbr-subsurface.glsl"
+
+layout(buffer_reference, scalar) buffer Vec4Buffer { vec4 data[]; };
+
+// per point, 2 vec4s in: (albedo.rgb, anisotropy), (radius.rgb, unused).
+// output 2 vec4s: (sigmaAbsorption.rgb, unused), (sigmaScattering.rgb, unused)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint pointCount;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	const uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.pointCount) {
+		return;
+	}
+
+	const vec4 in0 = Vec4Buffer(pc.inVa).data[i * 2u + 0u];
+	const vec4 in1 = Vec4Buffer(pc.inVa).data[i * 2u + 1u];
+	const vec3 albedo = in0.xyz;
+	const float anisotropy = in0.w;
+	const vec3 radius = in1.xyz;
+
+	vec3 sigmaAbsorption;
+	vec3 sigmaScattering;
+	openPbrSubsurfaceAlbedoToSigma(
+		albedo, radius, anisotropy, sigmaAbsorption, sigmaScattering
+	);
+
+	Vec4Buffer(pc.outVa).data[i * 2u + 0u] = vec4(sigmaAbsorption, 0.0f);
+	Vec4Buffer(pc.outVa).data[i * 2u + 1u] = vec4(sigmaScattering, 0.0f);
+}

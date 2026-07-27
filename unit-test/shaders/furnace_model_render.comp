@@ -1,0 +1,199 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_debug_printf : enable
+
+// PONDER_NAN_PROBES: temporary, for the DragonAttenuation firefly
+// investigation -- see util-material-openpbr-transmission.glsl and
+// util-raytrace.glsl's guarded debug blocks. remove alongside those once
+// root-caused
+#define PONDER_NAN_PROBES
+
+// furnace-tests a real loaded glTF model through the exact production path
+// tracer (utilTraceRay + utilIrradiancePropagationEntry, the same calls
+// resolve.comp makes) instead of resolve.comp itself, which writes to an
+// image vkof has no raw-float readback path for; this writes to a plain
+// buffer like every other render-validation unit test (see
+// cornell_openpbr_render.comp) so the result can be numerically checked for
+// NaN/Inf and firefly pixels, not just eyeballed. seeding is a simple
+// per-pixel-per-sample hash (fnPcgHash, same trick cornell's shader uses)
+// rather than resolve.comp's bluenoise stream -- an unrelated variance-
+// reduction detail, not part of what's being tested here
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "mor/mor-shared.h"
+
+// RESOLVE_NO_PC: pulls in GpuGlobalPc/GpuResolveModelIndirect(Buffer) from
+// resolve_pc.h without its own push_constant block, since this shader's
+// output is a buffer (outVa) rather than resolve.comp's image + bluenoise
+// pushconstant fields
+#define RESOLVE_NO_PC
+#include "resolve_pc.h"
+
+struct GpuFurnaceModelPC {
+	u64 outVa;
+	u32 width;
+	u32 height;
+	u32 sampleCount;
+	u32 propagationDepth;
+	u32 kullaContyEnergyHandle;
+	u32 zeltnerLtcParamHandle;
+	// decorrelates the per-pixel rng streams between otherwise-identical
+	// dispatches, so a test can render independent realizations of the same
+	// image (paired-noise variance estimation in test-environment-mis.cpp);
+	// 0 reproduces the pre-salt stream exactly
+	u32 seedSalt;
+	u32 pad0;
+};
+layout(push_constant, scalar) uniform PC {
+	GpuGlobalPc global;
+	GpuFurnaceModelPC furnace;
+} pc;
+
+#include "environment.glsl"
+#include "util-random.glsl"
+#include "util-raytrace.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (coord.x >= int(pc.furnace.width) || coord.y >= int(pc.furnace.height)) {
+		return;
+	}
+	const ivec2 screensize = ivec2(pc.furnace.width, pc.furnace.height);
+	const uint pixel = uint(coord.y) * pc.furnace.width + uint(coord.x);
+	nanProbeInit(
+		GpuGlobalExtendedBuffer(pc.global.extended).data.nanProbeCounterVa,
+		coord
+	);
+
+	const MaterialTableHandles materialTables = MaterialTableHandles(
+		pc.furnace.kullaContyEnergyHandle,
+		pc.furnace.zeltnerLtcParamHandle
+	);
+
+	// deterministic primary ray, no antialiasing jitter -- every sample
+	// re-traces the exact same camera ray, only the bsdf-path rng differs
+	const f32v2 uv = (f32v2(coord) + 0.5f) / f32v2(screensize);
+	const f32v2 ndc = uv * 2.0f - 1.0f;
+	const mat4 invVP = inverse(pc.global.viewProj);
+	const f32v4 worldFar = invVP * f32v4(ndc, 1.0f, 1.0f);
+	const f32v3 rayDir = (
+		normalize(worldFar.xyz / worldFar.w - pc.global.cameraPos)
+	);
+
+	const RayQueryResult primaryHit = (
+		utilTraceRay(
+			pc.global.cameraPos, rayDir, 999999.0f,
+			/*isShadowRay=*/false, /*testAlphaCutoff=*/true
+		)
+	);
+
+	f32v3 radianceSum = f32v3(0.0f);
+
+	if (primaryHit.dist <= 0.0f) {
+		// camera ray missed geometry entirely: every sample would retrace
+		// the identical miss, so skip the sample loop and write the
+		// environment radiance once
+		const GpuGlobalExtended unf = (
+			GpuGlobalExtendedBuffer(pc.global.extended).data
+		);
+		const EnvironmentMapHandles envHandles = (
+			unf.envMode == ENV_MODE_HDRMAP
+				? EnvironmentMapHandlesBuffer(unf.envMap).data
+				: EnvironmentMapHandles(0u, 0u, 0u, 0u)
+		);
+		radianceSum = (
+			sampleEnvironment(
+				rayDir, unf.envIntensity, unf.envMode,
+				envHandles, unf.envRotation
+			)
+			* f32(pc.furnace.sampleCount)
+		);
+	} else {
+		UtilMeshAttributeDataFromIndices rqData = (
+			utilMeshAttributeDataFromIndices(
+				primaryHit.modelDrawIndex,
+				primaryHit.primitiveIndex,
+				primaryHit.barycentric
+			)
+		);
+		const f32v3 origin = (
+			pc.global.cameraPos + rayDir * primaryHit.dist
+		);
+		const mat3 tbn = (
+			utilCalculateTbnBasis(rqData.normal, rqData.tangent)
+		);
+		f32v3 modelNormal;
+		f32v4 modelTangent;
+		f32v3 modelCoatNormal;
+		f32v4 modelCoatTangent;
+		const OpenPbrMaterial bsdfMaterial = (
+			openPbrLoadMaterialDeriv(
+				/*materialBuf=*/ rqData.materialBuf,
+				/*materialIdx=*/ rqData.materialIndex,
+				/*uvTransforms=*/rqData.uvTransforms,
+				/*uv=*/rqData.uv,
+				/*uvDx=*/f32v2(0.0f),
+				/*uvDy=*/f32v2(0.0f),
+				modelNormal, modelTangent, modelCoatNormal, modelCoatTangent
+			)
+		);
+		const f32v3 normalWorld = normalize(tbn * modelNormal);
+		const ShadingFrame frame = (
+			shadingFrameFromTangent(normalWorld, rqData.tangent.xyz)
+		);
+		const ShadingFrame coatFrame = (
+			shadingFrameFromTangent(
+				normalize(tbn * modelCoatNormal), rqData.tangent.xyz
+			)
+		);
+		const f32v3 normalGeometrical = rqData.normalGeometrical;
+		const f32v3 wi = -rayDir;
+
+		for (uint s = 0u; s < pc.furnace.sampleCount; ++s) {
+			// 7919 * salt keeps the salted streams disjoint from every
+			// (pixel, s) pair of the unsalted stream: s < sampleCount << 7919
+			// and 7919 < 9781, so no collision is reachable
+			const u32 h0 = (
+				fnPcgHash(pixel * 9781u + s + 1u + pc.furnace.seedSalt * 7919u)
+			);
+			const u32 h1 = fnPcgHash(h0);
+			u64 state = (u64(h0) << 32) | u64(h1);
+
+			const f32v4 irradiance = (
+				utilIrradiancePropagationEntry(
+					/*tables=*/materialTables,
+					/*originalMaterial=*/bsdfMaterial,
+					/*origin=*/origin,
+					/*frame=*/frame,
+					/*coatFrame=*/coatFrame,
+					/*normalGeometrical=*/normalGeometrical,
+					/*wi=*/wi,
+					/*propagationDepth=*/pc.furnace.propagationDepth,
+					/*state=*/state
+				)
+			);
+			radianceSum += irradiance.rgb;
+		}
+	}
+
+	const f32v3 radiance = radianceSum / f32(pc.furnace.sampleCount);
+	const uint pixelCount = pc.furnace.width * pc.furnace.height;
+	F32Buffer outBuf = F32Buffer(pc.furnace.outVa);
+	outBuf.data[pixel] = radiance.r;
+	outBuf.data[pixelCount + pixel] = radiance.g;
+	outBuf.data[2u * pixelCount + pixel] = radiance.b;
+}

@@ -1,0 +1,34 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+
+#include "util-energy-compensation.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
+layout(buffer_reference, scalar) buffer F32v2Buffer { f32v2 data[]; };
+
+// per sample: f32v2(mu, roughness)
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t inVa;
+	uint64_t outVa;
+	uint tableHandle;
+	uint count;
+} pc;
+
+layout(local_size_x = 64) in;
+
+void main() {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	const f32v2 s = F32v2Buffer(pc.inVa).data[i];
+	F32Buffer(pc.outVa).data[i] = (
+		utilMicrofacetDielectricEnergyCompensationKullaConty(
+			pc.tableHandle, s.x, s.y
+		)
+	);
+}

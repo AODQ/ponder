@@ -1,0 +1,144 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+// layer 1 of the path-tracer verification effort: single-bounce direct
+// lighting. a primary ray hits a lambertian plane (instance 0); exactly
+// one more bounce is sampled (cosine-weighted brdf importance sampling,
+// no next-event-estimation -- none exists in this harness yet). if that
+// bounce hits the light quad (instance 1) the sample contributes
+// albedo * emission (the usual f*cos/pdf = albedo cancellation for a
+// cosine-sampled lambertian lobe), otherwise zero. ties real bvh geometry
+// (layer 0) to a real shading bounce, isolated from any further/indirect
+// bounces so the estimator's mean has a closed-form (well, quadrature)
+// ground truth on the cpu side.
+struct ShadePoint {
+	vec3 origin;
+	vec3 direction;
+};
+layout(buffer_reference, scalar) buffer ShadePointBuffer {
+	ShadePoint data[];
+};
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	float data[];
+};
+
+layout(push_constant, scalar) uniform PC {
+	layout(offset = 128) uint64_t shadeVa;
+	uint64_t outVa;
+	uint shadeCount;
+	uint sampleCount;
+	float albedo;
+	float emission;
+} pc;
+
+uint fnPcgHash(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+vec2 fnSampleUniform2(inout uint state) {
+	state = fnPcgHash(state);
+	uint a = state;
+	state = fnPcgHash(state);
+	uint b = state;
+	return vec2(
+		uintBitsToFloat((a >> 9u) | 0x3F800000u) - 1.0,
+		uintBitsToFloat((b >> 9u) | 0x3F800000u) - 1.0
+	);
+}
+
+const float skTau = 6.28318530717958647692;
+
+// cosine-weighted hemisphere sample around n; pdf = cos(theta) / pi
+vec3 fnSampleCosineHemisphere(vec3 n, vec2 u) {
+	float r = sqrt(u.x);
+	float phi = skTau * u.y;
+	float lz = sqrt(max(0.0, 1.0 - u.x));
+	float s = (n.z >= 0.0) ? 1.0 : -1.0;
+	float a = -1.0 / (s + n.z);
+	float b = n.x * n.y * a;
+	vec3 t = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+	vec3 bt = vec3(b, s + n.y * n.y * a, -n.y);
+	return normalize(
+		t * (r * cos(phi)) + bt * (r * sin(phi)) + n * lz
+	);
+}
+
+layout(local_size_x = 64) in;
+
+void main() {
+	uint idx = gl_GlobalInvocationID.x;
+	if (idx >= pc.shadeCount) { return; }
+
+	ShadePointBuffer shadePts = ShadePointBuffer(pc.shadeVa);
+	ShadePoint sp = shadePts.data[idx];
+
+	rayQueryEXT primary;
+	rayQueryInitializeEXT(
+		/*rayQuery=*/primary,
+		/*topLevel=*/vkofTlas,
+		/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+		/*cullMask=*/0xFF,
+		/*origin=*/sp.origin,
+		/*tMin=*/0.0,
+		/*direction=*/sp.direction,
+		/*tMax=*/100.0
+	);
+	while (rayQueryProceedEXT(primary)) { }
+	bool primaryHit = (
+		rayQueryGetIntersectionTypeEXT(
+			/*rayQuery=*/primary, /*committed=*/true
+		)
+		!= gl_RayQueryCommittedIntersectionNoneEXT
+	);
+
+	float sum = 0.0;
+	if (primaryHit) {
+		float t = rayQueryGetIntersectionTEXT(
+			/*rayQuery=*/primary, /*committed=*/true
+		);
+		vec3 p = sp.origin + t * sp.direction;
+		vec3 n = vec3(0.0, 1.0, 0.0);
+		uint state = idx * 9781u + 1u;
+
+		for (uint s = 0u; s < pc.sampleCount; ++s) {
+			vec3 wo = fnSampleCosineHemisphere(n, fnSampleUniform2(state));
+			rayQueryEXT rq;
+			rayQueryInitializeEXT(
+				/*rayQuery=*/rq,
+				/*topLevel=*/vkofTlas,
+				/*rayFlags=*/gl_RayFlagsOpaqueEXT,
+				/*cullMask=*/0xFF,
+				/*origin=*/p + n * 0.001,
+				/*tMin=*/0.0,
+				/*direction=*/wo,
+				/*tMax=*/100.0
+			);
+			while (rayQueryProceedEXT(rq)) { }
+			bool hit = (
+				rayQueryGetIntersectionTypeEXT(
+					/*rayQuery=*/rq, /*committed=*/true
+				)
+				!= gl_RayQueryCommittedIntersectionNoneEXT
+			);
+			if (hit) {
+				uint inst = uint(
+					rayQueryGetIntersectionInstanceCustomIndexEXT(
+						/*rayQuery=*/rq, /*committed=*/true
+					)
+				);
+				if (inst == 1u) {
+					sum += pc.albedo * pc.emission;
+				}
+			}
+		}
+	}
+	F32Buffer(pc.outVa).data[idx] = sum / float(pc.sampleCount);
+}

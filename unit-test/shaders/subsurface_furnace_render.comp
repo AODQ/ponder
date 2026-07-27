@@ -1,0 +1,106 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// furnace-tests a real closed-mesh scene with a subsurface material through
+// the exact production path tracer (utilTraceRay + utilIrradiance
+// PropagationEntry, the same calls resolve.comp makes) -- this is the only
+// way to exercise utilSubsurfaceWalk / utilLoadSurfaceHit's mesh-hit
+// unpacking for real, rather than re-testing the primitives already
+// covered in isolation (test-subsurface-albedo.cpp, test-subsurface-walk
+// .cpp, test-subsurface-entry-sampling.cpp). modeled on the disabled
+// furnace_model_render.comp (test-furnace-model-render.cpp), updated to
+// the current utilIrradiancePropagationEntry(tables, vdb, origin,
+// worldDir, propagationDepth, state, unf) signature -- that file's own
+// call predates the vdb/GpuGlobalExtended parameters and no longer
+// compiles against current util-raytrace.glsl; unrelated to subsurface,
+// not fixed here.
+
+layout(set = 0, binding = 0) uniform sampler2D vkofTextures[];
+layout(set = 0, binding = 3) uniform accelerationStructureEXT vkofTlas;
+
+#include "mor/mor-shared.h"
+
+#define RESOLVE_NO_PC
+#include "resolve_pc.h"
+
+struct GpuSubsurfaceFurnacePC {
+	u64 outVa;
+	u32 width;
+	u32 height;
+	u32 sampleCount;
+	u32 propagationDepth;
+	u32 kullaContyEnergyHandle;
+	u32 zeltnerLtcParamHandle;
+	u32 seedSalt;
+	u32 pad0;
+};
+layout(push_constant, scalar) uniform PC {
+	GpuGlobalPc global;
+	GpuSubsurfaceFurnacePC furnace;
+} pc;
+
+#include "environment.glsl"
+#include "util-random.glsl"
+#include "util-raytrace.glsl"
+
+layout(buffer_reference, scalar) buffer F32Buffer {
+	f32 data[];
+};
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+	const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (coord.x >= int(pc.furnace.width) || coord.y >= int(pc.furnace.height)) {
+		return;
+	}
+	const ivec2 screensize = ivec2(pc.furnace.width, pc.furnace.height);
+	const uint pixel = uint(coord.y) * pc.furnace.width + uint(coord.x);
+
+	const MaterialTableHandles materialTables = MaterialTableHandles(
+		pc.furnace.kullaContyEnergyHandle,
+		pc.furnace.zeltnerLtcParamHandle
+	);
+
+	const f32v2 uv = (f32v2(coord) + 0.5f) / f32v2(screensize);
+	const f32v2 ndc = uv * 2.0f - 1.0f;
+	const mat4 invVP = inverse(pc.global.viewProj);
+	const f32v4 worldFar = invVP * f32v4(ndc, 1.0f, 1.0f);
+	const f32v3 rayDir = (
+		normalize(worldFar.xyz / worldFar.w - pc.global.cameraPos)
+	);
+
+	const GpuGlobalExtended unf = GpuGlobalExtendedBuffer(pc.global.extended).data;
+
+	f32v3 radianceSum = f32v3(0.0f);
+	for (uint s = 0u; s < pc.furnace.sampleCount; ++s) {
+		const u32 h0 = (
+			fnPcgHash(pixel * 9781u + s + 1u + pc.furnace.seedSalt * 7919u)
+		);
+		const u32 h1 = fnPcgHash(h0);
+		u64 state = (u64(h0) << 32) | u64(h1);
+
+		UtilVdb vdb;
+		vdb.isValid = false;
+
+		const f32v4 irradiance = (
+			utilIrradiancePropagationEntry(
+				materialTables, vdb, pc.global.cameraPos, rayDir,
+				pc.furnace.propagationDepth, state, unf
+			)
+		);
+		radianceSum += irradiance.rgb;
+	}
+
+	const f32v3 radiance = radianceSum / f32(pc.furnace.sampleCount);
+	const uint pixelCount = pc.furnace.width * pc.furnace.height;
+	F32Buffer outBuf = F32Buffer(pc.furnace.outVa);
+	outBuf.data[pixel] = radiance.r;
+	outBuf.data[pixelCount + pixel] = radiance.g;
+	outBuf.data[2u * pixelCount + pixel] = radiance.b;
+}
