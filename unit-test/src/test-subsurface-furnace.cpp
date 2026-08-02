@@ -124,7 +124,7 @@ RenderResult render_subsurface_box(
 ) {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -534,7 +534,7 @@ struct SubsurfaceProbePush {
 TEST_CASE("DEBUG: probe material.subsurfaceColor at the hit point") {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());

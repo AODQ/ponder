@@ -82,6 +82,14 @@ struct GpuMorMaterialComponent1 {
 	u32 uvTransform;
 };
 
+// (TODO REVIEW)
+// gltf alpha_mode. opaque forces geometryOpacity to 1, mask hard-thresholds
+// it against alphaCutoff, blend keeps it as fractional coverage
+#define MOR_ALPHA_MODE_OPAQUE 0
+#define MOR_ALPHA_MODE_MASK 1
+#define MOR_ALPHA_MODE_BLEND 2
+// (TODO REVIEW)
+
 struct GpuMorMaterial {
 	// based off OpenPBR however every single parameter can have a texture
 	// plugin. texture is assumed to be 1.0f in all channels if not set.
@@ -190,6 +198,10 @@ struct GpuMorMaterial {
 
 	// -- gltf extras, keep minimal
 	f32 alphaCutoff;
+	// (TODO REVIEW)
+	// MOR_ALPHA_MODE_*, selects how geometryOpacity is resolved
+	u32 alphaMode;
+	// (TODO REVIEW)
 };
 
 // sometimes the above is a bit repetitive, just use X macros
@@ -265,11 +277,15 @@ struct GpuMorMaterial {
 	MOR_MATERIAL_ALL_PARAMS_THIN_FILM(X) \
 	MOR_MATERIAL_ALL_PARAMS_GEOMETRY(X)
 
+// (TODO REVIEW)
+// third arg is what the map decodes to with no texture bound: +z for a
+// normal, +x for a tangent, so tbn * identity reproduces the mesh basis
 #define MOR_MATERIAL_ALL_PARAMS_NORMAL(X) \
-	X(geometryNormal, rgb); \
-	X(geometryTangent, rgba); \
-	X(geometryCoatNormal, rgb); \
-	X(geometryCoatTangent, rgba);
+	X(geometryNormal, rgb, vec4(0.0f, 0.0f, 1.0f, 0.0f)); \
+	X(geometryTangent, rgba, vec4(1.0f, 0.0f, 0.0f, 0.0f)); \
+	X(geometryCoatNormal, rgb, vec4(0.0f, 0.0f, 1.0f, 0.0f)); \
+	X(geometryCoatTangent, rgba, vec4(1.0f, 0.0f, 0.0f, 0.0f));
+// (TODO REVIEW)
 
 // the plain u32 texture fields not covered by MOR_MATERIAL_ALL_PARAMS
 #define MOR_MATERIAL_ALL_TEXTURES_NORMAL(X) \

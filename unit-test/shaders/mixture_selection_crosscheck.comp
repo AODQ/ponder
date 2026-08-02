@@ -50,7 +50,16 @@ OpenPbrLobeSelection openPbrLobeSelectionRef(
 		* utilMicrofacetDielectricAlbedo(mu, coatRoughness, refCoatF0)
 	);
 
-	const float refEtaEff = openPbrEffectiveIor(specularIor, specularWeight);
+	// the base is immersed in the coat, so \eta_s is the coat-affected ratio
+	// before specular_weight's f0 modulation (openpbr specular_ior_ratio);
+	// re-derived from the scalars here rather than calling the mat-level
+	// openPbrSpecularEffectiveIor, so this stays an independent combination
+	const float refEtaEff = (
+		openPbrEffectiveIor(
+			openPbrCoatAffectedIor(specularIor, coatIor, coatWeight),
+			specularWeight
+		)
+	);
 	const float refIorRatio = (refEtaEff - 1.0f) / (refEtaEff + 1.0f);
 	const float refF0 = refIorRatio * refIorRatio;
 	const float refRoughenedSpecRoughness = (

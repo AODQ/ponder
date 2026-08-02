@@ -73,29 +73,6 @@ const float skMinRoughness = 1e-3f;
 // -----------------------------------------------------------------------------
 
 
-vec3 openPbrBaseSubstrate(
-	const OpenPbrMaterial mat
-) {
-	/*
-		M_{bs} = mix( M_{db}, S_{metal}, M)\\
-		M_{db} = mix( M_{opaque-base}, S_{translucent-base}, T)\\
-
-		where,
-			bs = base substrate
-			db = dielectric base
-			M = base metallic
-			S = specular,
-			T = transmission weight
-	*/
-
-	const vec3 metallicDielectricBase = vec3(0.0f);//TODO
-	const vec3 surfaceMetallic = vec3(0.0f);//TODO
-	const vec3 subsurfaceTranslucentBase = vec3(0.0f);//TODO
-	const vec3 metallicOpaqueBase = vec3(0.0f);//TODO
-
-	return vec3(0.0f);
-}
-
 // -----------------------------------------------------------------------------
 // -- public api
 // -----------------------------------------------------------------------------
@@ -129,14 +106,14 @@ vec3 openPbrEvaluateF(
 			// and fuzz are ignored on the underside per the spec's own
 			// thin-walled approximation
 			const float etaEffThin = (
-				openPbrEffectiveIor(mat.specularIor, mat.specularWeight)
+				openPbrSpecularEffectiveIor(mat)
 			);
 			const float iorRatioThin = (
 				(etaEffThin - 1.0f) / (etaEffThin + 1.0f)
 			);
 			const float essThin = (
 				utilMicrofacetDielectricAlbedo(
-					abs(dot(nor, wo)),
+					abs(dot(nor, wi)),
 					openPbrCoatRoughenedRoughness(
 						mat.specularRoughness, mat.coatRoughness, mat.coatWeight
 					),
@@ -159,7 +136,7 @@ vec3 openPbrEvaluateF(
 	}
 
 	// -- relative ior
-	const float etaEff = openPbrEffectiveIor(mat.specularIor, mat.specularWeight);
+	const float etaEff = openPbrSpecularEffectiveIor(mat);
 	const float etaRel = isInsideMedium ? (1.0f / etaEff) : etaEff;
 	const float iorRatio = (etaEff - 1.0f) / (etaEff + 1.0f);
 	const float f0Eff = iorRatio * iorRatio;
@@ -204,7 +181,7 @@ vec3 openPbrEvaluateF(
 	);
 	const float fSpecularDirectionalAlbedo = (
 		utilMicrofacetDielectricAlbedo(
-			dot(nor, wo), roughenedSpecularRoughness, f0Eff
+			dot(nor, wi), roughenedSpecularRoughness, f0Eff
 		)
 	);
 	NAN_CHECK1(
@@ -277,7 +254,7 @@ OpenPbrLobeSelection openPbrLobeSelection(
 	const float dotNorWi
 ) {
 	const float mu = max(dotNorWi, 1e-5f);
-	const float etaEff = openPbrEffectiveIor(mat.specularIor, mat.specularWeight);
+	const float etaEff = openPbrSpecularEffectiveIor(mat);
 	const float iorRatio = (etaEff - 1.0f) / (etaEff + 1.0f);
 	const float f0 = iorRatio * iorRatio;
 

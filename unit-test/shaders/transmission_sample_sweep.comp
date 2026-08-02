@@ -65,6 +65,11 @@ void main() {
 
 	OpenPbrMaterial mat;
 	mat.specularIor = pc.ior;
+	// identities for the coat/weight ior modulation openPbrTransmissionIor
+	// now applies, so etaI/etaT below stay pc.ior exactly
+	mat.specularWeight = 1.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatIor = 1.0f;
 	mat.specularRoughnessAnisotropy = 0.0f;
 	mat.specularRoughnessAnisotropyRotation = 0.0f;
 	mat.specularRoughness = roughness;

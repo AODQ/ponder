@@ -108,7 +108,7 @@ TEST_CASE("stage: minimal scene without instances parses cameras/lights/env") {
 TEST_CASE("stage: gltf instance loads a real mor::Scene and applies overrides") {
 	std::filesystem::path const dir = stage_test_dir("gltf-instance");
 	std::string const gltfPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(gltfPath));
 
@@ -213,7 +213,7 @@ TEST_CASE("stage: save then reload round-trips fields and rebased asset paths") 
 	std::filesystem::path const srcDir = stage_test_dir("roundtrip-src");
 	std::filesystem::path const dstDir = stage_test_dir("roundtrip-dst");
 	std::string const gltfPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	std::string const vdbPath = (
 		std::string(REPO_DIR) + "/assets/vdb/smoke.vdb"
@@ -417,7 +417,7 @@ TEST_CASE("stage: load failures return the documented empty-sourceDirectory sent
 TEST_CASE("stage: unknown instance type/material/field are warned, not fatal") {
 	std::filesystem::path const dir = stage_test_dir("unknowns");
 	std::string const gltfPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 
 	std::string const json = (
@@ -476,7 +476,7 @@ TEST_CASE("stage: unknown instance type/material/field are warned, not fatal") {
 TEST_CASE("stage: relative asset paths resolve against the scene file directory") {
 	std::filesystem::path const dir = stage_test_dir("relative-paths");
 	std::filesystem::path const gltfPath = (
-		std::filesystem::path(REPO_DIR) / "assets/Models/Box/glTF/Box.gltf"
+		std::filesystem::path(REPO_DIR) / "assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(gltfPath));
 	std::filesystem::path const relative = (
@@ -511,7 +511,7 @@ TEST_CASE("stage: repeated load/destroy of a mixed scene many times") {
 	ponder::vdb_initialize();
 	std::filesystem::path const dir = stage_test_dir("stress");
 	std::string const gltfPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	std::string const vdbPath = (
 		std::string(REPO_DIR) + "/assets/vdb/smoke.vdb"

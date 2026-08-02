@@ -943,13 +943,59 @@ vec3 openPbrDielectricSpecularEvaluateF(
 	return mfFresnel * mfDistribution * mfVisibility * energyCompensation;
 }
 
+// (TODO REVIEW)
+// openpbr spec, coat: the base dielectric is immersed in the coat, so its
+// ior ratio is relative to the coat where the coat covers it
+/*
+	\eta_s = \mathrm{lerp}(n_b/n_a, n_b/n_c, C)
+		\tag{openpbr spec, specular_ior_ratio}\\
+	% kutz 2021: inverting the ratio when n_c > n_b kills the spurious
+	% grazing tir ring a lobe-mixture model cannot otherwise avoid
+	\eta_{bc} \rightarrow n_c/n_b \quad \mathrm{if} \; n_c > n_b
+		\tag{openpbr spec, specular_ior_ratio_with_tir_fix}
+*/
+float openPbrCoatAffectedIor(
+	const float specularIor,
+	const float coatIor,
+	const float coatWeight
+) {
+	if (coatWeight <= 0.0f) {
+		return specularIor;
+	}
+	const float ratio = specularIor / max(coatIor, 1e-5f);
+	const float tirFixed = ratio > 1.0f ? ratio : 1.0f / max(ratio, 1e-5f);
+	return mix(specularIor, tirFixed, coatWeight);
+}
+// (TODO REVIEW)
+
 // specular weight scales f0 via an effective ior
 float openPbrEffectiveIor(const float ior, const float weight) {
 	const float r = (ior - 1.0f) / (ior + 1.0f);
 	const float f0 = clamp(weight * r * r, 0.0f, 0.999f);
-	const float s = sqrt(f0);
+	// (TODO REVIEW)
+	// \epsilon = \mathrm{sgn}(\eta_s - 1)\sqrt{\xi_s F_s}; without the sign a
+	// sub-unity ratio (a base less dense than its surroundings) comes back
+	// inverted
+	const float s = sign(ior - 1.0f) * sqrt(f0);
+	// (TODO REVIEW)
 	return (1.0f + s) / (1.0f - s);
 }
+
+// (TODO REVIEW)
+// the base dielectric interface's ior: coat ratio first, then specular
+// weight's f0 modulation. every dielectric lobe of the base -- reflection,
+// transmission and the albedos that layer over them -- must share this
+float openPbrSpecularEffectiveIor(const OpenPbrMaterial mat) {
+	return (
+		openPbrEffectiveIor(
+			openPbrCoatAffectedIor(
+				mat.specularIor, mat.coatIor, mat.coatWeight
+			),
+			mat.specularWeight
+		)
+	);
+}
+// (TODO REVIEW)
 
 // inverse of the schlick ior->f0 relationship above, per channel; used to
 // recover an effective real ior from a tinted metal's f0 so thin-film

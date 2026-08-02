@@ -145,4 +145,16 @@ vec3 utilCosineHemisphereSampleWo(
 	return wo;
 }
 
+vec3 utilDirectionAboutAxis(
+	const vec3 axis, const float cosTheta, const float phi
+) {
+	const ShadingFrame frame = shadingFrameFromNormal(axis);
+	const float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta*cosTheta));
+	return (
+		frame.tanX * (sinTheta * cos(phi))
+		+ frame.tanY * (sinTheta * sin(phi))
+		+ frame.nor * cosTheta
+	);
+}
+
 #endif // UTIL_SHADING_FRAME_GLSL

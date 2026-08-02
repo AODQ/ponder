@@ -102,7 +102,7 @@ OpenPbrMaterial openPbrLoadMaterialDeriv(
 	matOut.coatRoughness.r = max(matOut.coatRoughness.r, skMinRoughness);
 	matOut.fuzzRoughness.r = max(matOut.fuzzRoughness.r, skMinRoughness);
 
-	#define LOAD_COMPONENT_NORMAL(name, swizzle) \
+	#define LOAD_COMPONENT_NORMAL(name, swizzle, identity) \
 		if (buf.data[idx]. name##Texture != 0) { \
 			const vec2 xfUv = ( \
 				openPbrTransformUv(uvTransforms, buf.data[idx]. name##UvTransform, uv) \
@@ -125,7 +125,7 @@ OpenPbrMaterial openPbrLoadMaterialDeriv(
 				- vec4(1.0f). swizzle \
 			); \
 		} else { \
-			name = vec4(0.0f, 0.0f, 1.0f, 0.0f) .swizzle; \
+			name = (identity) .swizzle; \
 		}
 	MOR_MATERIAL_ALL_PARAMS_NORMAL(LOAD_COMPONENT_NORMAL)
 	#undef LOAD_COMPONENT_NORMAL
@@ -152,6 +152,9 @@ OpenPbrMaterial openPbrLoadMaterialDeriv(
 	#undef LOAD_COMPONENT3
 
 	matOut.alphaCutoff = buf.data[idx].alphaCutoff;
+	// (TODO REVIEW)
+	matOut.alphaMode = buf.data[idx].alphaMode;
+	// (TODO REVIEW)
 
 	return matOut;
 }
@@ -197,7 +200,7 @@ OpenPbrMaterial openPbrLoadMaterialLod(
 	matOut.coatRoughness.r = max(matOut.coatRoughness.r, skMinRoughness);
 	matOut.fuzzRoughness.r = max(matOut.fuzzRoughness.r, skMinRoughness);
 
-	#define LOAD_COMPONENT_NORMAL(name, swizzle) \
+	#define LOAD_COMPONENT_NORMAL(name, swizzle, identity) \
 		if (buf.data[idx]. name##Texture != 0) { \
 			const vec2 xfUv = ( \
 				openPbrTransformUv(uvTransforms, buf.data[idx]. name##UvTransform, uv) \
@@ -214,7 +217,7 @@ OpenPbrMaterial openPbrLoadMaterialLod(
 				- vec4(1.0f). swizzle \
 			); \
 		} else { \
-			name = vec4(0.0f, 0.0f, 1.0f, 0.0f) .swizzle; \
+			name = (identity) .swizzle; \
 		}
 	MOR_MATERIAL_ALL_PARAMS_NORMAL(LOAD_COMPONENT_NORMAL)
 	#undef LOAD_COMPONENT_NORMAL
@@ -234,6 +237,9 @@ OpenPbrMaterial openPbrLoadMaterialLod(
 	MOR_MATERIAL_ALL_PARAMS_3(LOAD_COMPONENT3)
 	#undef LOAD_COMPONENT3
 	matOut.alphaCutoff = buf.data[idx].alphaCutoff;
+	// (TODO REVIEW)
+	matOut.alphaMode = buf.data[idx].alphaMode;
+	// (TODO REVIEW)
 	return matOut;
 }
 

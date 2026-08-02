@@ -73,6 +73,9 @@ void main() {
 		openPbrSubsurfaceWalkStep(
 			pc.sigmaAbsorption, pc.sigmaScattering, pc.distanceMax,
 			pc.wi, pc.anisotropy, pc.throughput,
+			// guiding disabled: this test covers the classical chromatic
+			// weighting in isolation
+			f32v3(0.0f),
 			outDistance, outWo, outWeight, state
 		)
 	);

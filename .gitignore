@@ -1,4 +1,6 @@
 .cache/
+crashes/
+*.spirv
 build/
 install/
 #unit-test/output/

@@ -129,9 +129,8 @@ OpenPbrCoatIblResult openPbrCoatIblEvaluate(
 	const float coatEtaRel = isInsideMedium ? (1.0f / mat.coatIor) : mat.coatIor;
 
 	// coat's own directional albedo at mu -- the same closed form
-	// openPbrCoatEvaluateF already calls twice (coatAlbedoWi, coatAlbedoWo)
-	// for its transmittance term, and openPbrLobeSelection uses for
-	// probabilityCoat; under N=V=R this single value stands in for both
+	// openPbrCoatEvaluateF uses for its transmittance term and
+	// openPbrLobeSelection for probabilityCoat
 	const float coatAlbedo = (
 		utilMicrofacetDielectricAlbedo(mu, mat.coatRoughness, f0)
 	);
@@ -193,16 +192,18 @@ OpenPbrCoatIblResult openPbrCoatIblEvaluate(
 	result.ownReflectance = (
 		mat.coatWeight * coatAlbedo * coatPrefilteredSpecular
 	);
-	// (1 - coatAlbedo)^2: one pass in, one pass out, same as the reference
-	// eval's (1 - coatAlbedoWi) * (1 - coatAlbedoWo) collapsed to one mu
+	// (TODO REVIEW)
+	// single (1 - coatAlbedo), matching openPbrCoatEvaluateF's one-sided
+	// albedo-scaling; under N=V=R there is only one mu to evaluate it at
 	result.attenuation = (
 		darkening
 		* mix(
 			vec3(1.0f),
-			(1.0f - coatAlbedo) * (1.0f - coatAlbedo) * coatAbsorption,
+			(1.0f - coatAlbedo) * coatAbsorption,
 			mat.coatWeight
 		)
 	);
+	// (TODO REVIEW)
 	return result;
 }
 
@@ -260,7 +261,7 @@ vec3 openPbrIblEvaluateF(
 	const bool isInsideMedium
 ) {
 	const float mu = max(dotNorWi, 1e-5f);
-	const float etaEff = openPbrEffectiveIor(mat.specularIor, mat.specularWeight);
+	const float etaEff = openPbrSpecularEffectiveIor(mat);
 	const float iorRatio = (etaEff - 1.0f) / (etaEff + 1.0f);
 	const float f0Eff = iorRatio * iorRatio;
 	const float roughenedSpecularRoughness = (

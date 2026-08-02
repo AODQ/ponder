@@ -71,12 +71,18 @@ static vkof::Sampler sImguiDisplaySampler = { 0u };
 
 // the same gltf texture can be requested as srgb (color) and unorm (data),
 // which are distinct images; the cache key must carry both
+// (TODO REVIEW)
 struct TextureKey
 {
 	cgltf_texture const * texture;
 	bool srgb;
+	// a normal map synthesized from this texture rather than the decoded
+	// texture itself, so it needs its own slot under the same cgltf source
+	bool generated { false };
 	bool operator==(TextureKey const & o) const {
-		return texture == o.texture && srgb == o.srgb;
+		return (
+			texture == o.texture && srgb == o.srgb && generated == o.generated
+		);
 	}
 };
 
@@ -86,9 +92,11 @@ struct TextureKeyHash
 		return (
 			std::hash<void const *>()(k.texture)
 			^ (k.srgb ? (size_t)0x9e3779b9u : (size_t)0u)
+			^ (k.generated ? (size_t)0x85ebca6bu : (size_t)0u)
 		);
 	}
 };
+// (TODO REVIEW)
 
 // a texture's return value from load_texture: the bindless image/sampler
 // handle plus an index into the scene's GpuMorUvTransform table
@@ -328,6 +336,93 @@ static bool uri_is_dds(char const * uri) {
 	return len >= 4 && strcasecmp(uri + len - 4, ".dds") == 0;
 }
 
+// exporters emit raw windows paths often enough that 'textures\leaf.png'
+// has to be split before the join; decode first, a backslash can arrive
+// percent-encoded
+static std::filesystem::path uri_resolve_path(
+	std::string const & gltfDir, char const * uri
+) {
+	std::string decoded = uri;
+	decoded.resize(cgltf_decode_uri(decoded.data()));
+	std::replace(decoded.begin(), decoded.end(), '\\', '/');
+	return std::filesystem::path(gltfDir) / decoded;
+}
+
+// (TODO REVIEW)
+// resolves the gltf sampler, publishes the bindless image/sampler pair and
+// records it in the scene's texture caches (which scene_set_anisotropy walks
+// to rebuild every handle, so generated images must land here too)
+static u32 texture_register(
+	ImplScene & s,
+	TextureKey const & texKey,
+	vkof::Image const image,
+	cgltf_sampler const * const cgSamp,
+	std::string name
+) {
+	auto const toFilter = [](int gl) -> vkof::SamplerFilter {
+		if (gl == 9728 || gl == 9984 || gl == 9986) {
+			return vkof::SamplerFilter::nearest;
+		}
+		return vkof::SamplerFilter::linear;
+	};
+	auto const toWrap = [](int gl) -> vkof::SamplerAddressMode {
+		if (gl == 33071) return vkof::SamplerAddressMode::clamp_to_edge;
+		if (gl == 33648) return vkof::SamplerAddressMode::mirrored_repeat;
+		return vkof::SamplerAddressMode::repeat;
+	};
+
+	SamplerKey const key {
+		.magFilter = (
+			cgSamp
+			? toFilter(cgSamp->mag_filter)
+			: vkof::SamplerFilter::linear
+		),
+		.minFilter = (
+			cgSamp
+			? toFilter(cgSamp->min_filter)
+			: vkof::SamplerFilter::linear
+		),
+		.addressU = (
+			cgSamp
+			? toWrap(cgSamp->wrap_s)
+			: vkof::SamplerAddressMode::repeat
+		),
+		.addressV = (
+			cgSamp
+			? toWrap(cgSamp->wrap_t)
+			: vkof::SamplerAddressMode::repeat
+		),
+		.mipmapMode = vkof::SamplerMipmapMode::linear,
+		.maxAnisotropy = 16.0f,
+	};
+	auto cacheIt = sSamplerCache.find(key);
+	if (cacheIt == sSamplerCache.end()) {
+		vkof::Sampler const sampler = vkof::sampler_create({
+			.magFilter = key.magFilter,
+			.minFilter = key.minFilter,
+			.addressModeU = key.addressU,
+			.addressModeV = key.addressV,
+			.addressModeW = vkof::SamplerAddressMode::repeat,
+			.mipmapMode = key.mipmapMode,
+			.maxAnisotropy = key.maxAnisotropy,
+		});
+		cacheIt = sSamplerCache.emplace(key, sampler).first;
+	}
+
+	u32 const handle = vkof::image_sampler_handle({
+		.image = image,
+		.sampler = cacheIt->second,
+	});
+
+	s.images.emplace_back(image);
+	s.imageNames.emplace_back(std::move(name));
+	s.textureHandles.emplace(texKey, handle);
+	s.textureImages.emplace(texKey, image);
+	s.textureSamplerKeys.emplace(texKey, key);
+	return handle;
+}
+// (TODO REVIEW)
+
 static TextureRef load_texture(
 	ImplScene & s,
 	cgltf_texture_view const & texture,
@@ -353,8 +448,8 @@ static TextureRef load_texture(
 		if (!ddsImg && uri_is_dds(img->uri)) { ddsImg = img; }
 		if (ddsImg && ddsImg->uri && strncmp(ddsImg->uri, "data:", 5) != 0) {
 			std::string const fullPath = (
-				std::filesystem::path(s.gltfDir) / ddsImg->uri
-			).string();
+				uri_resolve_path(s.gltfDir, ddsImg->uri).string()
+			);
 			std::ifstream file(fullPath, std::ios::binary);
 			if (file) {
 				std::vector<u8> const bytes(
@@ -395,7 +490,9 @@ static TextureRef load_texture(
 			int const encodedLen = (int)img->buffer_view->size;
 			pixels = stbi_load_from_memory(encoded, encodedLen, &w, &h, &channels, 4);
 		} else if (img->uri && strncmp(img->uri, "data:", 5) != 0) {
-			std::string const fullPath = (std::filesystem::path(s.gltfDir) / img->uri).string();
+			std::string const fullPath = (
+				uri_resolve_path(s.gltfDir, img->uri).string()
+			);
 			pixels = stbi_load(fullPath.c_str(), &w, &h, &channels, 4);
 		}
 
@@ -427,82 +524,174 @@ static TextureRef load_texture(
 		vkof::image_generate_mipmaps(image);
 	}
 
-	auto const toFilter = [](int gl) -> vkof::SamplerFilter {
-		if (gl == 9728 || gl == 9984 || gl == 9986) {
-			return vkof::SamplerFilter::nearest;
-		}
-		return vkof::SamplerFilter::linear;
-	};
-	auto const toWrap = [](int gl) -> vkof::SamplerAddressMode {
-		if (gl == 33071) return vkof::SamplerAddressMode::clamp_to_edge;
-		if (gl == 33648) return vkof::SamplerAddressMode::mirrored_repeat;
-		return vkof::SamplerAddressMode::repeat;
-	};
-
-	cgltf_sampler const * cgSamp = tex->sampler;
-	SamplerKey const key {
-		.magFilter = (
-			cgSamp
-			? toFilter(cgSamp->mag_filter)
-			: vkof::SamplerFilter::linear
-		),
-		.minFilter = (
-			cgSamp
-			? toFilter(cgSamp->min_filter)
-			: vkof::SamplerFilter::linear
-		),
-		.addressU = (
-			cgSamp
-			? toWrap(cgSamp->wrap_s)
-			: vkof::SamplerAddressMode::repeat
-		),
-		.addressV = (
-			cgSamp
-			? toWrap(cgSamp->wrap_t)
-			: vkof::SamplerAddressMode::repeat
-		),
-		.mipmapMode = vkof::SamplerMipmapMode::linear,
-		.maxAnisotropy = 16.0f,
-	};
-	auto cacheIt = sSamplerCache.find(key);
-	if (cacheIt == sSamplerCache.end()) {
-		vkof::Sampler const s = vkof::sampler_create({
-			.magFilter = key.magFilter,
-			.minFilter = key.minFilter,
-			.addressModeU = key.addressU,
-			.addressModeV = key.addressV,
-			.addressModeW = vkof::SamplerAddressMode::repeat,
-			.mipmapMode = key.mipmapMode,
-			.maxAnisotropy = key.maxAnisotropy,
-		});
-		cacheIt = sSamplerCache.emplace(key, s).first;
+	// (TODO REVIEW)
+	std::string name;
+	if (tex->name && tex->name[0] != '\0') {
+		name = tex->name;
+	} else if (img->name && img->name[0] != '\0') {
+		name = img->name;
+	} else if (img->uri) {
+		name = std::filesystem::path(img->uri).filename().string();
+	} else {
+		name = "[texture " + std::to_string(s.imageNames.size()) + "]";
 	}
-	vkof::Sampler const sampler = cacheIt->second;
 
-	u32 const handle = vkof::image_sampler_handle({
-		.image = image,
-		.sampler = sampler,
-	});
-
-	s.images.push_back(image);
-	{
-		std::string name;
-		if (tex->name && tex->name[0] != '\0') {
-			name = tex->name;
-		} else if (img->name && img->name[0] != '\0') {
-			name = img->name;
-		} else if (img->uri) {
-			name = std::filesystem::path(img->uri).filename().string();
-		} else {
-			name = "[texture " + std::to_string(s.imageNames.size()) + "]";
-		}
-		s.imageNames.push_back(std::move(name));
-	}
-	s.textureHandles.emplace(texKey, handle);
-	s.textureImages.emplace(texKey, image);
-	s.textureSamplerKeys.emplace(texKey, key);
+	u32 const handle = (
+		texture_register(s, texKey, image, tex->sampler, std::move(name))
+	);
+	// (TODO REVIEW)
 	return { handle, uvTransform };
 }
+
+// (TODO REVIEW)
+// scale applied to the synthesized normal map's height gradient; zero
+// disables generation entirely. set by scene_set_generated_normal_strength
+static f32 sGeneratedNormalStrength = 0.0f;
+
+// synthesizes a tangent-space normal map by reading the source texture's
+// luminance as a height field. there is no real height data in a color map,
+// so this fabricates plausible relief from pigment (dark == deep) rather than
+// recovering anything; it is only for assets that ship no normal map at all
+static TextureRef load_generated_normal_texture(
+	ImplScene & s,
+	cgltf_texture_view const & source,
+	f32 const strength
+) {
+	if (!source.texture || !source.texture->image) { return { 0u, 0u }; }
+	auto const & tex = source.texture;
+	cgltf_image const * const img = tex->image;
+
+	// the generated map lives in the source's uv space, so it inherits the
+	// source's KHR_texture_transform
+	u32 const uvTransform = load_uv_transform(s, source);
+
+	TextureKey const texKey {
+		.texture = tex, .srgb = false, .generated = true,
+	};
+	auto const it = s.textureHandles.find(texKey);
+	if (it != s.textureHandles.end()) { return { it->second, uvTransform }; }
+
+	int w = 0, h = 0, channels = 0;
+	stbi_uc * pixels = nullptr;
+	if (img->buffer_view) {
+		u8 const * const encoded = (
+			(u8 const *)img->buffer_view->buffer->data
+			+ img->buffer_view->offset
+		);
+		pixels = stbi_load_from_memory(
+			encoded, (int)img->buffer_view->size, &w, &h, &channels, 4
+		);
+	} else if (img->uri && strncmp(img->uri, "data:", 5) != 0) {
+		std::string const fullPath = (
+			uri_resolve_path(s.gltfDir, img->uri).string()
+		);
+		pixels = stbi_load(fullPath.c_str(), &w, &h, &channels, 4);
+	}
+	// block-compressed sources land here: stb cannot decode them, so there is
+	// no height field to derive and the material keeps its flat normal
+	if (!pixels || w < 2 || h < 2) {
+		if (pixels) { stbi_image_free(pixels); }
+		printf(
+			"mor: cannot generate a normal map from '%s'\n",
+			img->uri ? img->uri : "[embedded]"
+		);
+		return { 0u, uvTransform };
+	}
+
+	// wraps rather than clamps: the source's sampler repeats far more often
+	// than not, and a one-texel seam on a clamped map is invisible next to
+	// the fabrication already going on here
+	auto const luminance = [&](i32 const x, i32 const y) -> f32 {
+		u32 const cx = (u32)(((x % w) + w) % w);
+		u32 const cy = (u32)(((y % h) + h) % h);
+		stbi_uc const * const p = pixels + ((u64)cy * (u64)w + cx) * 4u;
+		return (
+			(0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) * (1.0f / 255.0f)
+		);
+	};
+
+	std::vector<u8> encoded((u64)w * (u64)h * 4u);
+	for (i32 y = 0; y < h; ++y) {
+		for (i32 x = 0; x < w; ++x) {
+			// sobel, so the gradient is per-texel; a higher-resolution source
+			// of the same image therefore reads as finer, shallower detail
+			f32 const dhdu = (
+				(
+					luminance(x + 1, y - 1)
+					+ 2.0f * luminance(x + 1, y)
+					+ luminance(x + 1, y + 1)
+				) - (
+					luminance(x - 1, y - 1)
+					+ 2.0f * luminance(x - 1, y)
+					+ luminance(x - 1, y + 1)
+				)
+			) * 0.125f;
+			f32 const dhdv = (
+				(
+					luminance(x - 1, y + 1)
+					+ 2.0f * luminance(x, y + 1)
+					+ luminance(x + 1, y + 1)
+				) - (
+					luminance(x - 1, y - 1)
+					+ 2.0f * luminance(x, y - 1)
+					+ luminance(x + 1, y - 1)
+				)
+			) * 0.125f;
+			// tangent space is (+u, -v, n) per gltf, so only the u gradient
+			// negates; the v gradient is already flipped by the basis
+			f32v3 const n = f32v3_normalize({
+				-dhdu * strength, dhdv * strength, 1.0f,
+			});
+			u8 * const out = encoded.data() + ((u64)y * (u64)w + (u64)x) * 4u;
+			out[0] = (u8)std::lround((n.x * 0.5f + 0.5f) * 255.0f);
+			out[1] = (u8)std::lround((n.y * 0.5f + 0.5f) * 255.0f);
+			out[2] = (u8)std::lround((n.z * 0.5f + 0.5f) * 255.0f);
+			out[3] = 255u;
+		}
+	}
+	stbi_image_free(pixels);
+
+	u32 const mipLevels = (
+		(u32)std::floor(std::log2((f32)std::max(w, h))) + 1u
+	);
+	vkof::Image const image = vkof::image_create({
+		.width = (u32)w,
+		.height = (u32)h,
+		.format = vkof::ImageFormat::r8g8b8a8_unorm,
+		.mipLevels = mipLevels,
+		.optInitialData = srat::slice<u8 const>(
+			encoded.data(), encoded.size()
+		),
+	});
+	vkof::image_generate_mipmaps(image);
+
+	std::string name = "[generated normal ";
+	if (img->uri) {
+		name += std::filesystem::path(img->uri).filename().string();
+	} else {
+		name += std::to_string(s.imageNames.size());
+	}
+	name += "]";
+
+	u32 const handle = (
+		texture_register(s, texKey, image, tex->sampler, std::move(name))
+	);
+	return { handle, uvTransform };
+}
+
+// the color texture a generated normal map derives its height field from
+static cgltf_texture_view const * material_base_color_view(
+	cgltf_material const & mat
+) {
+	if (mat.has_pbr_specular_glossiness) {
+		return &mat.pbr_specular_glossiness.diffuse_texture;
+	}
+	if (mat.has_pbr_metallic_roughness) {
+		return &mat.pbr_metallic_roughness.base_color_texture;
+	}
+	return nullptr;
+}
+// (TODO REVIEW)
 
 // gltf permits a roughness factor of exactly 0.0 (a perfect mirror), but the
 // ggx distribution/visibility terms have a removable singularity there that
@@ -560,6 +749,9 @@ static GpuMorMaterial material_load_default()
 	material.thinFilmIor.r = 1.4f;
 	material.geometryOpacity.r = 1.0f;
 	material.geometryThinWalled.r = 0.0f;
+	// (TODO REVIEW)
+	material.alphaMode = MOR_ALPHA_MODE_OPAQUE;
+	// (TODO REVIEW)
 	return material;
 }
 
@@ -813,16 +1005,27 @@ static void material_load_volume(
 	// transmissionDispersionScale;
 	// transmissionDispersionAbbeNumber;
 
+	// (TODO REVIEW)
+	// gltf tints the btdf by base color at the surface and attenuates
+	// through the interior on top of that, so fold into whatever the
+	// transmission load mirrored in rather than replacing it (texture kept)
 	out.transmissionColor.rgb = f32v3 {
-		vol.attenuation_color[0],
-		vol.attenuation_color[1],
-		vol.attenuation_color[2],
+		out.transmissionColor.rgb.x * vol.attenuation_color[0],
+		out.transmissionColor.rgb.y * vol.attenuation_color[1],
+		out.transmissionColor.rgb.z * vol.attenuation_color[2],
 	};
-	// attenuation is a plain factor; drop any base color texture the
-	// transmission load mirrored in
-	out.transmissionColor.texture = 0u;
-	out.transmissionColor.uvTransform = 0u;
-	out.transmissionDepth.r = vol.attenuation_distance;
+	// cgltf leaves attenuation_distance at FLT_MAX when the extension omits
+	// it. any nonzero depth switches transmissionColor from a surface tint
+	// to a beer-lambert extinction color, and at that scale it absorbs
+	// nothing -- so the tint would vanish from both paths. keep depth 0 and
+	// let the color stay a plain tint
+	if (
+		vol.attenuation_distance > 0.0f
+		&& vol.attenuation_distance < FLT_MAX
+	) {
+		out.transmissionDepth.r = vol.attenuation_distance;
+	}
+	// (TODO REVIEW)
 }
 
 // KHR_materials_volume_scatter postdates cgltf v1.15, so it is read out of
@@ -1243,6 +1446,21 @@ static void load_primitive(
 		}
 	}
 
+	// (TODO REVIEW)
+	// -- indices
+	// read before the attributes because generating missing normals or
+	// tangents needs the triangle list
+	std::vector<u32> indices(indexCount);
+	if (prim.indices) {
+		for (u32 i = 0; i < indexCount; ++i) {
+			indices[i] = (u32)cgltf_accessor_read_index(prim.indices, i);
+		}
+	} else {
+		for (u32 i = 0; i < indexCount; ++i) {
+			indices[i] = i;
+		}
+	}
+
 	// -- normals, uvs, tangents
 	{
 		std::vector<f32> normals(vertexCount * 3, 0.0f);
@@ -1256,12 +1474,104 @@ static void load_primitive(
 		}
 		if (tanAcc) {
 			cgltf_accessor_unpack_floats(tanAcc, tangents.data(), tangents.size());
-		} else {
+		}
+
+		auto const position = [&](u32 const i) -> f32v3 {
+			return s->positions[vertexBase + i];
+		};
+		auto const uv = [&](u32 const i) -> f32v2 {
+			return { uvs[i*2+0], uvs[i*2+1] };
+		};
+
+		// gltf calls for flat normals here; this accumulates smooth ones
+		// instead, since flat shading would mean splitting every shared vertex
+		if (!normAcc) {
+			for (u32 i = 0; i + 2 < indexCount; i += 3) {
+				u32 const i0 = indices[i+0];
+				u32 const i1 = indices[i+1];
+				u32 const i2 = indices[i+2];
+				if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+					continue;
+				}
+				// unnormalized, so the accumulation is area weighted
+				f32v3 const faceNormal = f32v3_cross(
+					position(i1) - position(i0), position(i2) - position(i0)
+				);
+				for (u32 const v : { i0, i1, i2 }) {
+					normals[v*3+0] += faceNormal.x;
+					normals[v*3+1] += faceNormal.y;
+					normals[v*3+2] += faceNormal.z;
+				}
+			}
+			for (u32 i = 0; i < vertexCount; ++i) {
+				f32v3 const n = f32v3_normalize({
+					normals[i*3+0], normals[i*3+1], normals[i*3+2],
+				});
+				normals[i*3+0] = n.x;
+				normals[i*3+1] = n.y;
+				normals[i*3+2] = n.z;
+			}
+		}
+
+		// a normal map is meaningless without a uv-aligned tangent, and gltf
+		// leaves generating one to the client whenever TANGENT is absent
+		if (!tanAcc && uvAcc) {
+			// lengyel: per-triangle du/dv gradients accumulated per vertex
+			std::vector<f32v3> uDir(vertexCount, f32v3 { 0.0f, 0.0f, 0.0f });
+			std::vector<f32v3> vDir(vertexCount, f32v3 { 0.0f, 0.0f, 0.0f });
+			for (u32 i = 0; i + 2 < indexCount; i += 3) {
+				u32 const i0 = indices[i+0];
+				u32 const i1 = indices[i+1];
+				u32 const i2 = indices[i+2];
+				if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+					continue;
+				}
+				f32v3 const e1 = position(i1) - position(i0);
+				f32v3 const e2 = position(i2) - position(i0);
+				f32v2 const d1 = uv(i1) - uv(i0);
+				f32v2 const d2 = uv(i2) - uv(i0);
+				f32 const det = d1.x * d2.y - d2.x * d1.y;
+				// a degenerate uv triangle carries no direction to contribute
+				if (std::abs(det) < 1e-12f) { continue; }
+				f32 const invDet = 1.0f / det;
+				f32v3 const su = (e1 * d2.y - e2 * d1.y) * invDet;
+				f32v3 const sv = (e2 * d1.x - e1 * d2.x) * invDet;
+				for (u32 const v : { i0, i1, i2 }) {
+					uDir[v] = uDir[v] + su;
+					vDir[v] = vDir[v] + sv;
+				}
+			}
+			for (u32 i = 0; i < vertexCount; ++i) {
+				f32v3 const n = f32v3_normalize({
+					normals[i*3+0], normals[i*3+1], normals[i*3+2],
+				});
+				f32v3 const raw = uDir[i] - n * f32v3_dot(n, uDir[i]);
+				f32 const len = f32v3_length(raw);
+				// leave a seam-only vertex at zero; the shader falls back to an
+				// arbitrary frisvad basis for a degenerate tangent
+				if (len < 1e-12f) { continue; }
+				f32v3 const t = raw / len;
+				// gltf's bitangent (cross(n, t) * w, what the shader rebuilds)
+				// runs along *decreasing* v, since uv origin is top-left.
+				// verified against authored TANGENT data, which disagrees on
+				// every vertex under the opposite sign
+				f32 const w = (
+					f32v3_dot(f32v3_cross(n, t), vDir[i]) < 0.0f ? 1.0f : -1.0f
+				);
+				tangents[i*4+0] = t.x;
+				tangents[i*4+1] = t.y;
+				tangents[i*4+2] = t.z;
+				tangents[i*4+3] = w;
+			}
+		} else if (!tanAcc) {
+			// no uvs to derive a tangent from; the anisotropy rotation still
+			// needs some stable direction
 			for (u32 i = 0; i < vertexCount; ++i) {
 				tangents[i*4+0] = 1.0f;
 				tangents[i*4+3] = 1.0f;
 			}
 		}
+
 		for (u32 i = 0; i < vertexCount; ++i) {
 			s->attributes.push_back({
 				.normal = { normals[i*3+0], normals[i*3+1], normals[i*3+2] },
@@ -1273,18 +1583,7 @@ static void load_primitive(
 			});
 		}
 	}
-
-	// -- indices
-	std::vector<u32> indices(indexCount);
-	if (prim.indices) {
-		for (u32 i = 0; i < indexCount; ++i) {
-			indices[i] = (u32)cgltf_accessor_read_index(prim.indices, i);
-		}
-	} else {
-		for (u32 i = 0; i < indexCount; ++i) {
-			indices[i] = i;
-		}
-	}
+	// (TODO REVIEW)
 
 	// -- materials
 	u32 materialIndex = 0;
@@ -1368,9 +1667,21 @@ static void load_primitive(
 
 			// -- load in non-optional parameters
 			{
-				TextureRef const t = load_texture(*s, mat.normal_texture, false);
+				// (TODO REVIEW)
+				TextureRef t = load_texture(*s, mat.normal_texture, false);
+				if (t.handle == 0u && sGeneratedNormalStrength > 0.0f) {
+					cgltf_texture_view const * const src = (
+						material_base_color_view(mat)
+					);
+					if (src) {
+						t = load_generated_normal_texture(
+							*s, *src, sGeneratedNormalStrength
+						);
+					}
+				}
 				gpuMaterial.geometryNormalTexture = t.handle;
 				gpuMaterial.geometryNormalUvTransform = t.uvTransform;
+				// (TODO REVIEW)
 			}
 			{
 				TextureRef const t = load_texture(*s, mat.emissive_texture, true);
@@ -1394,11 +1705,18 @@ static void load_primitive(
 			) {
 				gpuMaterial.emissionLuminance.r = 1.0f;
 			}
+			// (TODO REVIEW)
 			if (mat.alpha_mode == cgltf_alpha_mode_mask) {
+				gpuMaterial.alphaMode = MOR_ALPHA_MODE_MASK;
 				gpuMaterial.alphaCutoff = mat.alpha_cutoff;
+			} else if (mat.alpha_mode == cgltf_alpha_mode_blend) {
+				gpuMaterial.alphaMode = MOR_ALPHA_MODE_BLEND;
+				gpuMaterial.alphaCutoff = 0.0f;
 			} else {
+				gpuMaterial.alphaMode = MOR_ALPHA_MODE_OPAQUE;
 				gpuMaterial.alphaCutoff = 0.0f;
 			}
+			// (TODO REVIEW)
 			// opaque alpha mode ignores the base color alpha entirely
 			if (mat.alpha_mode == cgltf_alpha_mode_opaque) {
 				gpuMaterial.geometryOpacity.texture = 0u;
@@ -1663,6 +1981,14 @@ u32 mor::scene_vertex_count(mor::Scene const & scene) {
 	return (u32)reinterpret_cast<ImplScene const *>(scene.id)->positions.size();
 }
 
+// (TODO REVIEW)
+GpuMorVertexAttribute const * mor::scene_vertex_attributes(
+	mor::Scene const & scene
+) {
+	return reinterpret_cast<ImplScene const *>(scene.id)->attributes.data();
+}
+// (TODO REVIEW)
+
 void mor::scene_bounds(mor::Scene const & scene, f32v3 & outMin, f32v3 & outMax) {
 	ImplScene const * const s = reinterpret_cast<ImplScene const *>(scene.id);
 	outMin = { FLT_MAX, FLT_MAX, FLT_MAX };
@@ -1763,6 +2089,12 @@ void mor::scene_imgui_textures(mor::Scene const & scene) {
 		ImGui::Image(s->imguiIds[i], ImVec2(skThumbSize, skThumbSize));
 	}
 }
+
+// (TODO REVIEW)
+void mor::scene_set_generated_normal_strength(f32 const strength) {
+	sGeneratedNormalStrength = std::max(strength, 0.0f);
+}
+// (TODO REVIEW)
 
 void mor::scene_load_gltf(mor::Scene const & scene, char const * const path) {
 	ImplScene * const s = reinterpret_cast<ImplScene *>(scene.id);

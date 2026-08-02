@@ -64,7 +64,7 @@ f32v3 openPbrGlossyDiffuseLayerEvaluateF(
 	);
 	const f32 fSpecularDirectionalAlbedo = (
 		utilMicrofacetDielectricAlbedo(
-			dot(nor, wo), roughenedSpecularRoughness, f0Eff
+			dot(nor, wi), roughenedSpecularRoughness, f0Eff
 		)
 	);
 

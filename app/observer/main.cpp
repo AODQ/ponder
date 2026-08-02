@@ -93,7 +93,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	// TODO below is temp
 	// -- initialize application arguments
 	char const * const defaultPath = (
-		"assets/Models/ABeautifulGame/glTF/ABeautifulGame.gltf"
+		"assets/models-categorized/production-scene/ABeautifulGame.glb"
 	);
 	char const * const defaultEnvPath = (
 		"assets/environments/kloofendal_48d_partly_cloudy_puresky_4k.exr"

@@ -16,7 +16,7 @@
         {
             "type": "gltf",
             "name": "ABeautifulGame",
-            "path": "/home/toad/repo/ponder/assets/Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/ABeautifulGame.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -92,7 +92,7 @@
         {
             "type": "gltf",
             "name": "ToyCar",
-            "path": "/home/toad/repo/ponder/assets/Models/ToyCar/glTF-Binary/ToyCar.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/ToyCar.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -117,7 +117,7 @@
         {
             "type": "gltf",
             "name": "WaterBottle",
-            "path": "/home/toad/repo/ponder/assets/Models/WaterBottle/glTF-Binary/WaterBottle.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-core/WaterBottle.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -142,7 +142,7 @@
         {
             "type": "gltf",
             "name": "USDShaderBallForGltf",
-            "path": "/home/toad/repo/ponder/assets/Models/USDShaderBallForGltf/glTF-Binary/USDShaderBallForGltf.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/USDShaderBallForGltf.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -172,7 +172,7 @@
         {
             "type": "gltf",
             "name": "GlamVelvetSofa",
-            "path": "/home/toad/repo/ponder/assets/Models/GlamVelvetSofa/glTF/GlamVelvetSofa.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-sheen/GlamVelvetSofa.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -202,7 +202,7 @@
         {
             "type": "gltf",
             "name": "Box",
-            "path": "/home/toad/repo/ponder/assets/Models/Box/glTF/Box.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-core/Box.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -285,7 +285,7 @@
         {
             "type": "gltf",
             "name": "DragonDispersion",
-            "path": "/home/toad/repo/ponder/assets/Models/DragonDispersion/glTF/DragonDispersion.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-transparency/DragonDispersion.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -315,7 +315,7 @@
         {
             "type": "gltf",
             "name": "IridescentDishWithOlives",
-            "path": "/home/toad/repo/ponder/assets/Models/IridescentDishWithOlives/glTF/IridescentDishWithOlives.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/IridescentDishWithOlives.glb",
             "visible": true,
             "transform": {
                 "position": [

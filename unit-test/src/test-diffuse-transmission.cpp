@@ -69,14 +69,18 @@ struct DiffuseTransmissionPush {
 	u32 pad0;
 };
 
-// renders the conformance asset through the production path tracer.
-// forceOpaque zeroes every subsurfaceWeight, which is the same scene with
-// diffuse transmission switched off -- the two renders must differ
-std::vector<f32> render_conformance_asset(bool const forceOpaque) {
+// renders the conformance asset through the production path tracer twice:
+// once as authored, once with every subsurfaceWeight zeroed (the same scene
+// with diffuse transmission switched off). one scene/blas/table/pipeline
+// setup drives both -- only the material buffer differs, and building the
+// whole thing twice per test case exhausts the validation layer
+void render_conformance_pair(
+	std::vector<f32> & outLit, std::vector<f32> & outOpaque
+) {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
 		std::string(REPO_DIR)
-		+ "/assets/Models/DiffuseTransmissionTest/glTF/DiffuseTransmissionTest.gltf"
+		+ "/assets/models-categorized/test-transparency/DiffuseTransmissionTest.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -85,15 +89,12 @@ std::vector<f32> render_conformance_asset(bool const forceOpaque) {
 	REQUIRE(bufs.triangleCount > 0u);
 
 	mor::GpuMaterials const materials = mor::scene_gpu_materials_create(scene);
-	if (forceOpaque) {
-		u32 const count = mor::scene_gpu_materials_count(materials);
-		for (u32 i = 0u; i < count; ++i) {
-			GpuMorMaterial mat = mor::scene_gpu_materials_get(materials, i);
-			mat.subsurfaceWeight.r = 0.0f;
-			mat.subsurfaceWeight.texture = 0u;
-			mor::scene_material_override_scalars(materials, i, mat);
-		}
-		mor::scene_gpu_materials_upload(materials);
+	// captured before any override so the second pass can zero from the
+	// authored values rather than from an already-modified buffer
+	u32 const materialCount = mor::scene_gpu_materials_count(materials);
+	std::vector<GpuMorMaterial> authored;
+	for (u32 i = 0u; i < materialCount; ++i) {
+		authored.push_back(mor::scene_gpu_materials_get(materials, i));
 	}
 
 	auto const blas = vkof::blas_create({
@@ -291,13 +292,32 @@ std::vector<f32> render_conformance_asset(bool const forceOpaque) {
 		.seedSalt = 1u,
 		.pad0 = 0u,
 	};
-	test::dispatch(
-		pl, push, (width + 7u) / 8u, (height + 7u) / 8u, 1u,
-		srat::slice_as_bytes(globalPC)
-	);
-	test::gpu_wait();
+	for (u32 pass = 0u; pass < 2u; ++pass) {
+		bool const forceOpaque = (pass == 1u);
+		for (u32 i = 0u; i < materialCount; ++i) {
+			GpuMorMaterial mat = authored[i];
+			if (forceOpaque) {
+				mat.subsurfaceWeight.r = 0.0f;
+				mat.subsurfaceWeight.texture = 0u;
+			}
+			mor::scene_material_override_scalars(materials, i, mat);
+		}
+		mor::scene_gpu_materials_upload(materials);
 
-	auto const raw = test::readback<f32>(outBuf, 0u, 3u * pixelCount);
+		test::dispatch(
+			pl, push, (width + 7u) / 8u, (height + 7u) / 8u, 1u,
+			srat::slice_as_bytes(globalPC)
+		);
+		test::gpu_wait();
+		std::vector<f32> const raw = (
+			test::readback<f32>(outBuf, 0u, 3u * pixelCount)
+		);
+		if (forceOpaque) {
+			outOpaque = raw;
+		} else {
+			outLit = raw;
+		}
+	}
 
 	vkof::buffer_destroy(outBuf);
 	vkof::buffer_destroy(modelsBuf);
@@ -313,7 +333,6 @@ std::vector<f32> render_conformance_asset(bool const forceOpaque) {
 	mor::scene_gpu_destroy(gpuScene);
 	mor::scene_destroy(scene);
 	mor::sampler_cache_destroy();
-	return raw;
 }
 
 } // namespace
@@ -324,7 +343,7 @@ TEST_CASE("gltf diffuse transmission: conformance asset maps onto the sheet") {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
 		std::string(REPO_DIR)
-		+ "/assets/Models/DiffuseTransmissionTest/glTF/DiffuseTransmissionTest.gltf"
+		+ "/assets/models-categorized/test-transparency/DiffuseTransmissionTest.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -376,8 +395,10 @@ TEST_CASE("gltf diffuse transmission: conformance asset maps onto the sheet") {
 }
 
 TEST_CASE("gltf diffuse transmission: changes the render, finite everywhere") {
-	auto const lit = render_conformance_asset(/*forceOpaque=*/false);
-	auto const opaque = render_conformance_asset(/*forceOpaque=*/true);
+	std::vector<f32> lit;
+	std::vector<f32> opaque;
+	render_conformance_pair(lit, opaque);
+	REQUIRE(!lit.empty());
 	REQUIRE(lit.size() == opaque.size());
 
 	u32 nonFinite = 0u;
@@ -418,7 +439,7 @@ TEST_CASE("gltf transmission: base color tints transmission") {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
 		std::string(REPO_DIR)
-		+ "/assets/Models/LightsPunctualLamp/glTF/LightsPunctualLamp.gltf"
+		+ "/assets/models-categorized/test-lights/LightsPunctualLamp.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());

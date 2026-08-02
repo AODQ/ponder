@@ -32,9 +32,25 @@ Scene scene_create();
 void scene_destroy(Scene const & scene);
 void scene_load_gltf(Scene const & scene, char const * const path);
 
+// (TODO REVIEW)
+// for materials that ship no normal texture, synthesizes one from the base
+// color's luminance treated as a height field. this fabricates relief from
+// pigment rather than recovering it, so it is off (0) by default; strength
+// scales the per-texel height gradient. applies to subsequent loads
+void scene_set_generated_normal_strength(f32 const strength);
+// (TODO REVIEW)
+
 u32 scene_instance_count(Scene const & scene);
 u32 scene_meshlet_count(Scene const & scene);
 u32 scene_vertex_count(Scene const & scene);
+// (TODO REVIEW)
+// cpu-side vertex attributes exactly as uploaded, scene_vertex_count long.
+// exists so the tangent basis (generated when a gltf omits TANGENT) can be
+// checked without a gpu readback
+[[nodiscard]] GpuMorVertexAttribute const * scene_vertex_attributes(
+	Scene const & scene
+);
+// (TODO REVIEW)
 void scene_bounds(Scene const & scene, f32v3 & outMin, f32v3 & outMax);
 // false if any material in the scene uses a gltf blend mode other than
 // opaque (mask or blend); the blas can only be marked opaque otherwise

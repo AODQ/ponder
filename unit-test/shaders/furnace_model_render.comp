@@ -127,7 +127,9 @@ void main() {
 			utilMeshAttributeDataFromIndices(
 				primaryHit.modelDrawIndex,
 				primaryHit.primitiveIndex,
-				primaryHit.barycentric
+				primaryHit.barycentric,
+				// the material load below passes zero uv derivatives
+				/*unpackUvDerivatives=*/false
 			)
 		);
 		const f32v3 origin = (

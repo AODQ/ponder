@@ -109,6 +109,17 @@ void openPbrSubsurfaceAlbedoToSigma(
 // via #include: pulling in util-vdb.glsl here would drag its nanovdb/
 // bindless-buffer bindings into every consumer of util-material-openpbr.glsl,
 // almost none of which touch vdb grids at all
+// (TODO REVIEW)
+// hg phase value for the guided walk's mis denominator. classical-only
+// sampling never needed it: hg sampling is exact, so phase/pdf cancels
+float openPbrSubsurfacePhaseEvalHg(const float cosTheta, const float g) {
+	const float g2 = g * g;
+	const float denom = max(1.0f + g2 - 2.0f * g * cosTheta, 1e-7f);
+	// (1 - g^2) / (4 \pi (1 + g^2 - 2 g \cos\theta)^{3/2})
+	return (1.0f - g2) / (2.0f * TAU * denom * sqrt(denom));
+}
+// (TODO REVIEW)
+
 float openPbrSubsurfacePhaseSampleHgCos(const float u, const float g) {
 	// isotropic limit
 	if (abs(g) < 1e-3f) {
@@ -131,13 +142,7 @@ vec3 openPbrSubsurfacePhaseSampleWo(
 		openPbrSubsurfacePhaseSampleHgCos(xi.x, anisotropy)
 	);
 	const float phi = TAU * xi.y;
-	const ShadingFrame frame = shadingFrameFromNormal(wi);
-	const float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-	return (
-		frame.tanX * (sinTheta * cos(phi))
-		+ frame.tanY * (sinTheta * sin(phi))
-		+ frame.nor * cosTheta
-	);
+	return utilDirectionAboutAxis(wi, cosTheta, phi);
 }
 
 // one free-flight step landed on the medium boundary unscattered (t >=
@@ -208,6 +213,74 @@ uint openPbrSubsurfaceSampleChannel(const vec3 channelPdf, inout u64 state) {
 	return 2u;
 }
 
+// -----------------------------------------------------------------------------
+// -- dwivedi diffusion support
+// -----------------------------------------------------------------------------
+// dwivaldi meng 2016 , d'eon 2020 zero variance chapter
+// implements 'importance-sampling'-esque guiding of the random walk's
+// free-flight direction along, sampling a ray towards where the walk
+// is likely to exit the medium.
+// The guide steers both direction and distance
+// It's only an approximation; it starts to fail when the medium is thin;
+// that's why it needs to be mixed and importance-sampled against the
+// classical sampling.
+
+// diffusion length:
+/*
+	\begin{align}
+	&L(\alpha) =
+		1 / \sqrt{1 - \alpha^(2.44294 - 0.0215813 * \alpha + 0.578637/\alpha)}
+		\tag{D'eon 2020, eq 67
+	\\
+	&
+		p(cos \theta = \frac{1}{((L - cos\theta) * \text{phase_log})}
+		\tag{Meng eq 9}
+	\\
+	&
+		cos(\theta) = L - (L+1) * exp(-Xi * \text{phase_log})
+		\text{Meng eq 10}
+	\\
+	&
+		\sigma_t' = \sigma_t * (1 - cos\theta/L)
+		\sigma_t' = \sigma_t * (1 + cos\theta/L)
+	\end{align}
+	where L is the diffusion length,
+	\alpha is the maximum albedo of the three channels,
+	phase_log is the log of the phase function,
+*/
+
+float openPbrDwivediDiffusionLength(const float albedoMax) {
+	const float a = clamp(albedoMax, 0.0f, 0.99999f);
+	return (
+		// 1 / \sqrt{1 - \alpha^(2.44294 - 0.0215813 * \alpha + 0.578637/\alpha)}
+		1.0f / sqrt(1.0f - pow(a, 2.44294f - 0.0215813f * a + 0.578637f / a))
+	);
+}
+
+float openPbrDwivediPhaseEval(
+	const float diffusionLength,
+	const float phaseLog,
+	const float cosTheta
+) {
+	return (
+		// p(cos \theta) = \frac{1}{((L - cos\theta) * \text{phase_log})}
+		1.0f / ((diffusionLength - cosTheta) * phaseLog)
+	);
+}
+
+float openPbrDwivediPhaseSampleCos(
+	const float diffusionLength,
+	const float phaseLog,
+	const float xi
+) {
+	// cos(\theta) = L - (L+1) * exp(-Xi * \text{phase_log})
+	return diffusionLength - (diffusionLength + 1.0f) * exp(-xi * phaseLog);
+}
+
+// -----------------------------------------------------------------------------
+// -- subsurface lobe interface
+// -----------------------------------------------------------------------------
+
 /*
 	one free-flight step, hero channel drawn fresh this call from
 	channelPdf (computed by the caller from the CURRENT throughput, since
@@ -231,6 +304,12 @@ uint openPbrSubsurfaceWalkStep(
 	const vec3 wi,
 	const float anisotropy,
 	const vec3 throughput,
+	// (TODO REVIEW)
+	// dwivedi guiding axis: the outward normal at the walk's entry point,
+	// so cos -> 1 means heading back out. a zero vector disables guiding
+	// and leaves every result identical to the classical walk
+	const vec3 guidingAxis,
+	// (TODO REVIEW)
 	out float outDistance,
 	out vec3 outWo,
 	out vec3 outWeight,
@@ -246,27 +325,101 @@ uint openPbrSubsurfaceWalkStep(
 	const vec3 albedo = sigmaScattering / max(sigmaT, vec3(1e-8f));
 	const vec3 channelPdf = openPbrSubsurfaceChannelPdf(throughput, albedo);
 	const uint channel = openPbrSubsurfaceSampleChannel(channelPdf, state);
-	const float sigmaTChannel = max(sigmaT[channel], 1e-8f);
+	// same clamp openPbrSubsurfaceAlbedoToSigma applied when building sigma
+	// from this g -- the walk's phase function and its medium must agree on g
+	const float g = min(anisotropy, skMaxSubsurfaceAnisotropy);
 
+	// (TODO REVIEW)
+	// -- dwivedi guiding. every quantity below collapses to the classical
+	// one when guidedFraction is 0, so the disabled path stays exact
+	const float diffusionLength = (
+		openPbrDwivediDiffusionLength(max(albedo.x, max(albedo.y, albedo.z)))
+	);
+	const bool guidingEnabled = (
+		dot(guidingAxis, guidingAxis) > 0.5f && diffusionLength > 1.0f
+	);
+	const float phaseLog = (
+		guidingEnabled
+		? log((diffusionLength + 1.0f) / (diffusionLength - 1.0f))
+		: 0.0f
+	);
+	// the zero-variance solution assumes isotropic scattering, so fade the
+	// guided strategy out as the phase function sharpens
+	const float guidedFraction = (
+		guidingEnabled ? 1.0f - max(0.5f, pow(abs(g), 0.125f)) : 0.0f
+	);
+	// already heading for the exit: stretch the free path. heading deeper
+	// shortens it, so the walk can turn around sooner
+	const float cosTravel = guidingEnabled ? dot(wi, guidingAxis) : 0.0f;
+	const vec3 sigmaTGuided = (
+		max(
+			sigmaT * (1.0f - cosTravel / max(diffusionLength, 1.0f)),
+			vec3(1e-8f)
+		)
+	);
+	// strategy pick must precede the distance draw it modifies. the draw is
+	// independent of the xi pair the direction uses
+	const bool guided = (
+		guidedFraction > 0.0f && fnSampleUniform(state) < guidedFraction
+	);
+	const vec3 sigmaTUsed = guided ? sigmaTGuided : sigmaT;
+	// (TODO REVIEW)
+
+	const float sigmaTChannel = max(sigmaTUsed[channel], 1e-8f);
 	const float t = -log(1.0f - fnSampleUniform(state)) / sigmaTChannel;
 	if (t >= distanceMax) {
+		// (TODO REVIEW)
+		// both strategies could have reached the boundary, so the mis
+		// denominator mixes both survival probabilities; the numerator stays
+		// the physical transmittance
 		const vec3 survival = exp(-sigmaT * distanceMax);
-		const float mix = dot(channelPdf, survival);
-		outWeight = survival / max(mix, 1e-8f);
+		const vec3 survivalGuided = exp(-sigmaTGuided * distanceMax);
+		const float denom = (
+			dot(channelPdf, mix(survival, survivalGuided, guidedFraction))
+		);
+		// (TODO REVIEW)
+		outWeight = survival / max(denom, 1e-8f);
 		outDistance = distanceMax;
 		return OPENPBR_SUBSURFACE_WALK_EXIT;
 	}
 
 	const vec3 transmittance = exp(-sigmaT * t);
+	// (TODO REVIEW)
+	// mixture over both strategies regardless of which one drew t --
+	// evaluating only the taken branch is what biases a guided walk
 	const vec3 density = sigmaT * transmittance;
-	const float mix = dot(channelPdf, density);
-	outWeight = (sigmaScattering * transmittance) / max(mix, 1e-8f);
+	const vec3 densityGuided = sigmaTGuided * exp(-sigmaTGuided * t);
+	const float denom = (
+		dot(channelPdf, mix(density, densityGuided, guidedFraction))
+	);
+	// (TODO REVIEW)
+	outWeight = (sigmaScattering * transmittance) / max(denom, 1e-8f);
 	outDistance = t;
 	const vec2 xi = vec2(fnSampleUniform(state), fnSampleUniform(state));
-	// same clamp openPbrSubsurfaceAlbedoToSigma applied when building sigma
-	// from this g -- the walk's phase function and its medium must agree on g
-	const float g = min(anisotropy, skMaxSubsurfaceAnisotropy);
-	outWo = openPbrSubsurfacePhaseSampleWo(wi, g, xi);
+	// (TODO REVIEW)
+	if (guided) {
+		const float cosTheta = (
+			openPbrDwivediPhaseSampleCos(diffusionLength, phaseLog, xi.x)
+		);
+		outWo = utilDirectionAboutAxis(guidingAxis, cosTheta, TAU * xi.y);
+	} else {
+		outWo = openPbrSubsurfacePhaseSampleWo(wi, g, xi);
+	}
+	// hg sampling cancels against its own pdf, so the classical walk needed
+	// no directional factor. once the guided strategy can produce the
+	// direction, divide the physical phase value by the mixture that did
+	if (guidedFraction > 0.0f) {
+		const float phaseHg = openPbrSubsurfacePhaseEvalHg(dot(wi, outWo), g);
+		const float pdfGuided = (
+			openPbrDwivediPhaseEval(
+				diffusionLength, phaseLog, dot(outWo, guidingAxis)
+			) / TAU
+		);
+		outWeight *= (
+			phaseHg / max(mix(phaseHg, pdfGuided, guidedFraction), 1e-8f)
+		);
+	}
+	// (TODO REVIEW)
 	return OPENPBR_SUBSURFACE_WALK_SCATTER;
 }
 

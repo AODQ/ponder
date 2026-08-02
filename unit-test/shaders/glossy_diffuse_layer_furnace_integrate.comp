@@ -58,7 +58,7 @@ f32v3 openPbrGlossyDiffuseLayerEvaluateF(
 	);
 	const f32 fSpecularDirectionalAlbedo = (
 		utilMicrofacetDielectricAlbedo(
-			dot(nor, wo), roughenedSpecularRoughness, f0Eff
+			dot(nor, wi), roughenedSpecularRoughness, f0Eff
 		)
 	);
 
@@ -69,24 +69,17 @@ layout(buffer_reference, scalar) buffer F32Buffer { f32 data[]; };
 layout(buffer_reference, scalar) buffer F32v3Buffer { f32v3 data[]; };
 
 // furnace test: numerically integrates the combined glossy-diffuse layer
-// over the wi hemisphere (incident directions) for a FIXED wo (view
-// direction), under constant unit illumination. this is the directional-
-// hemispherical reflectance as a function of the VIEW direction -- the
-// convention Rs (fSpecularDirectionalAlbedo) is itself defined in, since
-// it's evaluated at dot(nor, wo).
-//
-// fixing wi instead and integrating over wo (the more obvious-looking
-// choice) does NOT give a clean identity: Rs(wo) would then vary across
-// the integration domain instead of factoring out, so the result depends
-// on how Rs happens to correlate with the diffuse lobe's shape across the
-// hemisphere rather than reducing algebraically. fixing wo makes Rs(wo) a
-// constant pulled out of the integral:
-//   integral_wi [fSpecular(wi,wo) + (1-Rs(wo))*fDiffuse(wi,wo)] dwi
-//     = R_spec_actual(wo) + (1-Rs(wo)) * R_diffuse_actual(wo)
+// over the wo hemisphere for a FIXED wi, under constant unit illumination
+// -- the same roles the renderer uses (wi is the camera-side direction,
+// wo is what gets integrated/sampled). openpbr's albedo-scaling evaluates
+// Rs at that fixed camera-side direction (spec's \omega_o) precisely so it
+// pulls out of the integral:
+//   integral_wo [fSpecular(wi,wo) + (1-Rs(wi))*fDiffuse(wi,wo)] dwo
+//     = R_spec_actual(wi) + (1-Rs(wi)) * R_diffuse_actual(wi)
 // for a fully white, fully-weighted material this is
-// R_spec_actual(wo) + (1-Rs(wo))*1 (diffuse integrates to 1, proven by the
-// eon furnace test), which is exactly 1 to the extent Rs(wo) approximates
-// R_spec_actual(wo) -- the SAME turquin-compensation approximation error
+// R_spec_actual(wi) + (1-Rs(wi))*1 (diffuse integrates to 1, proven by the
+// eon furnace test), which is exactly 1 to the extent Rs(wi) approximates
+// R_spec_actual(wi) -- the SAME turquin-compensation approximation error
 // already bounded generously in test-dielectric-specular.cpp's furnace
 // test, not a new source of error introduced by this layer.
 //
@@ -131,7 +124,8 @@ void main() {
 	frame.tanY = f32v3(0.0f, 1.0f, 0.0f);
 	frame.nor = f32v3(0.0f, 0.0f, 1.0f);
 
-	const f32v3 wo = f32v3(sqrt(max(0.0f, 1.0f - muO * muO)), 0.0f, muO);
+	// fixed camera-side direction -- the renderer passes this as wi
+	const f32v3 wi = f32v3(sqrt(max(0.0f, 1.0f - muO * muO)), 0.0f, muO);
 
 	const f32 dTheta = (PI * 0.5f) / f32(pc.thetaSteps);
 	const f32 dPhi = (2.0f * PI) / f32(pc.phiSteps);
@@ -139,17 +133,17 @@ void main() {
 	f32 sum = 0.0f;
 	for (uint ti = 0u; ti < pc.thetaSteps; ++ti) {
 		const f32 theta = (f32(ti) + 0.5f) * dTheta;
-		const f32 cosThetaI = cos(theta);
-		const f32 sinThetaI = sin(theta);
+		const f32 cosTheta = cos(theta);
+		const f32 sinTheta = sin(theta);
 		for (uint pi = 0u; pi < pc.phiSteps; ++pi) {
 			const f32 phi = (f32(pi) + 0.5f) * dPhi;
-			const f32v3 wi = (
-				f32v3(sinThetaI * cos(phi), sinThetaI * sin(phi), cosThetaI)
+			const f32v3 wo = (
+				f32v3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta)
 			);
 			const f32v3 f = (
 				openPbrGlossyDiffuseLayerEvaluateF(mat, frame, wi, wo)
 			);
-			sum += f.x * cosThetaI * sinThetaI * dTheta * dPhi;
+			sum += f.x * cosTheta * sinTheta * dTheta * dPhi;
 		}
 	}
 	F32Buffer(pc.outVa).data[i] = sum;

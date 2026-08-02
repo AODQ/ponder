@@ -22,12 +22,29 @@ struct RayQueryResult {
 	f32v2 barycentric;
 };
 
-RayQueryResult utilTraceRay(
+// (TODO REVIEW)
+// openpbr geometry_opacity resolved to a coverage fraction: the alpha in
+// M_pbr = mix(S_ambient_medium, M_surface, alpha). gltf MASK quantizes it
+// to 0/1 (spec: opaque when alpha >= cutoff), BLEND keeps it fractional,
+// OPAQUE arrives already forced to 1 by mor's loader
+float utilAlphaCoverage(const OpenPbrMaterial mat) {
+	if (mat.alphaMode == MOR_ALPHA_MODE_MASK) {
+		return mat.geometryOpacity >= mat.alphaCutoff ? 1.0f : 0.0f;
+	}
+	return mat.geometryOpacity;
+}
+
+// stochasticCoverage: BLEND surfaces pass the ray straight through with
+// probability 1-alpha instead of thresholding. unbiased, and because it
+// resolves inside traversal the pass-through costs no bounce and no re-trace
+RayQueryResult utilTraceRayImpl(
 	const vec3 origin,
 	const vec3 dir,
 	const float maxDist,
 	const bool isShadowRay,
-	const bool testAlphaCutoff
+	const bool testAlphaCutoff,
+	const bool stochasticCoverage,
+	inout u64 state
 ) {
 	rayQueryEXT rq;
 	uint rayFlags = 0;
@@ -81,7 +98,15 @@ RayQueryResult utilTraceRay(
 			)
 		);
 
-		if (mat.geometryOpacity > mat.alphaCutoff) {
+		// a fresh draw per candidate, never one shared along the ray:
+		// two stacked alpha-0.5 cards must pass 0.25 of the time, not 0.5
+		const float coverage = utilAlphaCoverage(mat);
+		const bool covered = (
+			stochasticCoverage
+			? fnSampleUniform(state) < coverage
+			: coverage >= 0.5f
+		);
+		if (covered) {
 			rayQueryConfirmIntersectionEXT(rq);
 			if (isShadowRay) {
 				rayQueryTerminateEXT(rq);
@@ -111,6 +136,40 @@ RayQueryResult utilTraceRay(
 
 	return RayQueryResult(0.0f, 0u, 0u, f32v2(0.0f));
 }
+
+// path-tracing entry: BLEND coverage resolves stochastically against the
+// path's rng stream
+RayQueryResult utilTraceRay(
+	const vec3 origin,
+	const vec3 dir,
+	const float maxDist,
+	const bool isShadowRay,
+	const bool testAlphaCutoff,
+	inout u64 state
+) {
+	return utilTraceRayImpl(
+		origin, dir, maxDist, isShadowRay, testAlphaCutoff,
+		/*stochasticCoverage=*/true, state
+	);
+}
+
+// aov/picking/debug entry: no rng stream to spend, and a stochastic hit
+// would make picking and single-sample probes flicker frame to frame, so
+// BLEND collapses to a half-coverage threshold
+RayQueryResult utilTraceRay(
+	const vec3 origin,
+	const vec3 dir,
+	const float maxDist,
+	const bool isShadowRay,
+	const bool testAlphaCutoff
+) {
+	u64 unusedState = 0ul;
+	return utilTraceRayImpl(
+		origin, dir, maxDist, isShadowRay, testAlphaCutoff,
+		/*stochasticCoverage=*/false, unusedState
+	);
+}
+// (TODO REVIEW)
 
 // -----------------------------------------------------------------------------
 // -- irradiance propagation
@@ -143,6 +202,10 @@ bool utilSubsurfaceWalk(
 	inout f32v3 itOri,
 	inout f32v3 bsdfWo,
 	const OpenPbrMaterial entryMaterial,
+	// (TODO REVIEW)
+	// outward normal at the entry vertex; the dwivedi guiding axis
+	const f32v3 entryNormal,
+	// (TODO REVIEW)
 	inout f32v3 irradianceThroughput,
 	inout f32v3 irradianceAccumulator,
 	inout u64 state,
@@ -232,13 +295,17 @@ int utilIrradiance(
 			? pathSpectralChannel
 			: min(int(fnSampleUniform(state) * 3.0f), 2)
 	);
-	// n(\lambda_c); falls back to the flat mat.specularIor when this
+	// n(\lambda_c); falls back to the flat interface ior when this
 	// material has no dispersion at all
+	// (TODO REVIEW)
+	// both branches carry specular_weight's ior modulation so the refraction
+	// matches the reflection lobe's \eta'_s
 	const f32 dispersedIor = (
 		material.transmissionDispersionScale > 0.0f
 			? openPbrDispersionIorRgb(material)[provisionalChannel]
-			: material.specularIor
+			: openPbrTransmissionIor(material)
 	);
+	// (TODO REVIEW)
 
 	// -- next event estimation: importance-samples the env map directly
 	// instead of relying on a bsdf-sampled bounce to hit it by chance,
@@ -290,7 +357,8 @@ int utilIrradiance(
 						envDir,
 						/*maxDist=*/999999.0f,
 						/*isShadowRay=*/true,
-						/*testAlphaCutoff=*/true
+						/*testAlphaCutoff=*/true,
+						state
 					)
 				);
 				if (visibilityRq.dist <= 0.0f) {
@@ -368,7 +436,9 @@ int utilIrradiance(
 		itOri -= itNormalGeometrical * 0.000001f;
 		const bool exited = (
 			utilSubsurfaceWalk(
-				tables, itOri, bsdfWo, material,
+				// (TODO REVIEW)
+				tables, itOri, bsdfWo, material, itFrame.nor,
+				// (TODO REVIEW)
 				irradianceThroughput, irradianceAccumulator,
 				state, unf, envHandles, envNeeActive, bsdfPdf
 			)
@@ -581,10 +651,10 @@ void utilLoadSurfaceHit(
 	const mat3 tbn = (
 		utilCalculateTbnBasis(rqData.normal, rqData.tangent)
 	);
-	f32v3 modelNormal;
-	f32v4 tangentNormal;
-	f32v3 modelCoatNormal;
-	f32v4 modelClearcoatNormal;
+	f32v3 geometryNormal;
+	f32v4 geometryTangent;
+	f32v3 geometryCoatNormal;
+	f32v4 geometryCoatTangent;
 	material = (
 		openPbrLoadMaterialDeriv(
 			/*materialBuf=*/ rqData.materialBuf,
@@ -593,29 +663,33 @@ void utilLoadSurfaceHit(
 			/*uv=*/rqData.uv,
 			/*uvDx=*/rqData.uvDx,
 			/*uvDy=*/rqData.uvDy,
-			modelNormal, tangentNormal, modelCoatNormal, modelClearcoatNormal
+			geometryNormal, geometryTangent, geometryCoatNormal, geometryCoatTangent
 		)
 	);
 	itOri = itOri + bsdfWo * rq.dist;
-	// shading frame from the normal-mapped normal + mesh/uv tangent
+	// (TODO REVIEW)
+	// shading frame from the normal-mapped normal + openpbr geometry_tangent,
+	// which is what steers the anisotropy direction; an unbound tangent map
+	// decodes to +x, so tbn maps it straight back onto the mesh/uv tangent
 	itFrame = (
 		shadingFrameFromTangent(
 			utilShadingNormalOrGeometric(
-				tbn * modelNormal, rqData.normalGeometrical
+				tbn * geometryNormal, rqData.normalGeometrical
 			),
-			rqData.tangent.xyz
+			tbn * geometryTangent.xyz
 		)
 	);
-	// coat's own shading normal (khr_materials_clearcoat), same mesh
-	// tangent basis as the base frame above
+	// coat's own shading normal + tangent (khr_materials_clearcoat has no
+	// tangent of its own, so it rides the same identity fallback)
 	itCoatFrame = (
 		shadingFrameFromTangent(
 			utilShadingNormalOrGeometric(
-				tbn * modelCoatNormal, rqData.normalGeometrical
+				tbn * geometryCoatNormal, rqData.normalGeometrical
 			),
-			rqData.tangent.xyz
+			tbn * geometryCoatTangent.xyz
 		)
 	);
+	// (TODO REVIEW)
 	itNormalGeometrical = rqData.normalGeometrical;
 	itWi = -bsdfWo;
 	// back-face hit: either just refracted through, or continuing to
@@ -673,6 +747,10 @@ bool utilSubsurfaceWalk(
 	inout f32v3 itOri,
 	inout f32v3 bsdfWo,
 	const OpenPbrMaterial entryMaterial,
+	// (TODO REVIEW)
+	// outward normal at the entry vertex; the dwivedi guiding axis
+	const f32v3 entryNormal,
+	// (TODO REVIEW)
 	inout f32v3 irradianceThroughput,
 	inout f32v3 irradianceAccumulator,
 	inout u64 state,
@@ -693,7 +771,7 @@ bool utilSubsurfaceWalk(
 
 	for (int step = 0; step < skSubsurfaceWalkMaxSteps; ++step) {
 		const RayQueryResult rq = (
-			utilTraceRay(itOri, bsdfWo, 999999.0f, false, true)
+			utilTraceRay(itOri, bsdfWo, 999999.0f, false, true, state)
 		);
 		if (rq.dist <= 0.0f) {
 			return false;
@@ -706,7 +784,10 @@ bool utilSubsurfaceWalk(
 			openPbrSubsurfaceWalkStep(
 				sigmaAbsorption, sigmaScattering, rq.dist,
 				bsdfWo, entryMaterial.subsurfaceScatterAnisotropy,
-				irradianceThroughput, outDistance, outWo, outWeight, state
+				// (TODO REVIEW)
+				irradianceThroughput, entryNormal,
+				// (TODO REVIEW)
+				outDistance, outWo, outWeight, state
 			)
 		);
 
@@ -782,7 +863,10 @@ bool utilSubsurfaceWalk(
 		// and layering transmission's separate dispersion mechanism on
 		// top of that here would be new scope, not a port of anything
 		// this file already does
-		const f32 etaI = exitMaterial.specularIor;
+		// (TODO REVIEW)
+		// same \eta'_s the exit interface's own reflection lobe uses
+		const f32 etaI = openPbrTransmissionIor(exitMaterial);
+		// (TODO REVIEW)
 		const f32 etaT = 1.0f;
 		const f32v3 refracted = refract(-exitWi, h, etaI / etaT);
 		if (length(refracted) <= 0.5f) {
@@ -815,7 +899,7 @@ bool utilSubsurfaceWalk(
 					openPbrTransmissionEvaluateF(
 						exitMaterial, exitFrame, exitWi, envDir,
 						/*isInsideMedium=*/true,
-						/*dispersedIor=*/exitMaterial.specularIor
+						/*dispersedIor=*/etaI
 					)
 				);
 				if (any(greaterThan(f, f32v3(0.0f)))) {
@@ -823,7 +907,7 @@ bool utilSubsurfaceWalk(
 						openPbrTransmissionPdf(
 							exitMaterial, exitFrame, exitWi, envDir,
 							/*isInsideMedium=*/true,
-							/*dispersedIor=*/exitMaterial.specularIor
+							/*dispersedIor=*/etaI
 						)
 					);
 					const f32 weightL = misBalanceWeight(envPdf, bsdfPdfAtEnvDir);
@@ -833,7 +917,8 @@ bool utilSubsurfaceWalk(
 					const RayQueryResult visibilityRq = (
 						utilTraceRay(
 							shadowOrigin, envDir, /*maxDist=*/999999.0f,
-							/*isShadowRay=*/true, /*testAlphaCutoff=*/true
+							/*isShadowRay=*/true, /*testAlphaCutoff=*/true,
+							state
 						)
 					);
 					if (visibilityRq.dist <= 0.0f) {
@@ -853,23 +938,50 @@ bool utilSubsurfaceWalk(
 			}
 		}
 
+		// (TODO REVIEW)
+		// partial fresnel reflection back into the medium. only total
+		// internal reflection was handled before, so every sub-critical
+		// exit silently dropped its reflected fraction F -- an
+		// angle-dependent energy loss that rings along iso-exit-angle
+		// contours and starves obliquely-lit regions. clamped so the
+		// branch probability and the weight divide use the same F
+		const f32 fresnelExit = (
+			min(
+				utilMicrofacetFresnelDielectric(
+					abs(dot(exitWi, h)), etaT / etaI
+				),
+				1.0f - 1e-4f
+			)
+		);
+		if (fnSampleUniform(state) < fresnelExit) {
+			bsdfWo = normalize(2.0f * dot(exitWi, h) * h - exitWi);
+			itOri += exitNormalGeometrical * 0.0005f;
+			continue;
+		}
+		// (TODO REVIEW)
+
 		const f32 dotNorWo = dot(exitFrame.nor, refracted);
 		const f32 exitPdf = (
 			openPbrTransmissionPdf(
 				exitMaterial, exitFrame, exitWi, refracted,
-				/*isInsideMedium=*/true, /*dispersedIor=*/exitMaterial.specularIor
+				/*isInsideMedium=*/true, /*dispersedIor=*/etaI
 			)
 		);
 		if (exitPdf <= 0.0f) {
 			return false;
 		}
+		// (TODO REVIEW)
+		// the branch above already charged F, and openPbrTransmissionEvaluateF
+		// carries its own (1 - F); dividing by the transmit probability
+		// cancels it so fresnel is counted exactly once
 		irradianceThroughput *= (
 			openPbrTransmissionEvaluateF(
 				exitMaterial, exitFrame, exitWi, refracted,
-				/*isInsideMedium=*/true, /*dispersedIor=*/exitMaterial.specularIor
+				/*isInsideMedium=*/true, /*dispersedIor=*/etaI
 			)
-			* abs(dotNorWo) / exitPdf
+			* abs(dotNorWo) / (exitPdf * (1.0f - fresnelExit))
 		);
+		// (TODO REVIEW)
 		NAN_CHECK3(
 			irradianceThroughput,
 			"NaN utilSubsurfaceWalk.irradianceThroughput after exit divide px(%d,%d)=%v3f"
@@ -947,7 +1059,8 @@ int utilIrradianceWalk(
 			/*dir=*/ bsdfWo,
 			/*maxDist=*/999999.0f,
 			/*isShadowRay=*/false,
-			/*testAlphaCutoff=*/true
+			/*testAlphaCutoff=*/true,
+			state
 		)
 	);
 
@@ -1017,9 +1130,11 @@ int utilIrradianceWalk(
 			\mu_t = -\ln(T) / \lambda, \quad
 			\mu_a = \mu_t - \mu_s
 			\\
+			\mathrm{if} \; \min(\mu_a) < 0: \quad
+			\mu_a \leftarrow \mu_a - \min(\mu_a)
+			\\
 			scattering is carved out of the extinction transmission_color
-			already implies, not added on top; S can outrun it, so floor
-			the remainder at a purely scattering medium
+			already implies, not added on top
 		*/
 		const f32v3 sigmaScattering = (
 			material.transmissionScatter / material.transmissionDepth
@@ -1028,9 +1143,23 @@ int utilIrradianceWalk(
 			-log(max(material.transmissionColor, f32v3(1e-6f)))
 			/ material.transmissionDepth
 		);
-		const f32v3 sigmaAbsorption = (
-			max(sigmaExtinction - sigmaScattering, f32v3(0.0f))
+		// (TODO REVIEW)
+		// S can outrun the extinction transmission_color implies. openpbr
+		// shifts the negative remainder by enough *gray* to clear zero, so
+		// the hue survives; a per-channel clamp would tint the medium
+		const f32v3 sigmaAbsorptionRaw = sigmaExtinction - sigmaScattering;
+		const f32 sigmaAbsorptionMin = (
+			min(
+				min(sigmaAbsorptionRaw.r, sigmaAbsorptionRaw.g),
+				sigmaAbsorptionRaw.b
+			)
 		);
+		const f32v3 sigmaAbsorption = (
+			sigmaAbsorptionMin < 0.0f
+				? sigmaAbsorptionRaw - f32v3(sigmaAbsorptionMin)
+				: sigmaAbsorptionRaw
+		);
+		// (TODO REVIEW)
 		for (i32 s = 0; s < 64; ++s) {
 			if (rq.dist <= 0.0f) {
 				break;
@@ -1042,7 +1171,11 @@ int utilIrradianceWalk(
 				openPbrSubsurfaceWalkStep(
 					sigmaAbsorption, sigmaScattering, rq.dist, bsdfWo,
 					material.transmissionScatterAnisotropy,
-					irradianceThroughput, outDistance, outWo, outWeight, state
+					// (TODO REVIEW)
+					// no entry normal tracked here, so guiding stays off
+					irradianceThroughput, f32v3(0.0f),
+					// (TODO REVIEW)
+					outDistance, outWo, outWeight, state
 				)
 			);
 			irradianceThroughput *= outWeight;
@@ -1061,7 +1194,7 @@ int utilIrradianceWalk(
 			if (length(irradianceThroughput) < 1e-4f) {
 				return skWalkCap;
 			}
-			rq = utilTraceRay(itOri, bsdfWo, 999999.0f, false, true);
+			rq = utilTraceRay(itOri, bsdfWo, 999999.0f, false, true, state);
 		}
 	}
 	// (TODO REVIEW)
@@ -1181,7 +1314,8 @@ int utilIrradianceWalk(
 							envDir,
 							/*maxDist=*/999999.0f,
 							/*isShadowRay=*/true,
-							/*testAlphaCutoff=*/true
+							/*testAlphaCutoff=*/true,
+							state
 						)
 					);
 					if (visibilityRq.dist <= 0.0f) {
@@ -1229,7 +1363,8 @@ int utilIrradianceWalk(
 					/*dir=*/ bsdfWo,
 					/*maxDist=*/999999.0f,
 					/*isShadowRay=*/false,
-					/*testAlphaCutoff=*/true
+					/*testAlphaCutoff=*/true,
+					state
 				)
 			);
 		}

@@ -107,6 +107,11 @@ struct ViewerArgs {
 	// toggle (a budgeted --screenshot accumulates fewer samples per pixel
 	// than --spp names, since each frame only refreshes a tile window)
 	f32 budgetMs = 0.0f;
+	// (TODO REVIEW)
+	// > 0 synthesizes a normal map from base color luminance for materials
+	// that ship without one; see --gen-normals
+	f32 generatedNormalStrength = 0.0f;
+	// (TODO REVIEW)
 	// vulkan validation layers (debug_printf capture, validation_message --
 	// see vkof::init) off by default: meaningful chunk of windowed startup
 	// time most interactive use doesn't need. headless (--screenshot)
@@ -140,6 +145,11 @@ void print_usage() {
 		"      written out; <= 0 disables (default 20.0)\n"
 		"  [--budget-ms <f>]  start with the resolve frame budget enabled\n"
 		"      at this gpu-ms target; <= 0 disables (default off)\n"
+		// (TODO REVIEW)
+		"  [--gen-normals <f>]  for materials with no normal map, synthesize\n"
+		"      one from base color luminance at this strength; fabricated\n"
+		"      relief, not real height data (default 0, off)\n"
+		// (TODO REVIEW)
 		"  [--debug]  enable vulkan validation layers (slower startup;\n"
 		"      needed for NaN probes / validation messages -- always on\n"
 		"      with --screenshot)\n"
@@ -206,6 +216,10 @@ bool parse_args(i32 const argc, char const * const * const argv, ViewerArgs & ou
 			out.fireflyClampLuminance = (f32)atof(argv[++i]);
 		} else if (strcmp(argv[i], "--budget-ms") == 0 && i + 1 < argc) {
 			out.budgetMs = (f32)atof(argv[++i]);
+		// (TODO REVIEW)
+		} else if (strcmp(argv[i], "--gen-normals") == 0 && i + 1 < argc) {
+			out.generatedNormalStrength = (f32)atof(argv[++i]);
+		// (TODO REVIEW)
 		} else if (strcmp(argv[i], "--debug") == 0) {
 			out.debug = true;
 		} else if (strcmp(argv[i], "--stage") == 0 && i + 1 < argc) {
@@ -584,6 +598,10 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	// args just opens empty (headless still requires one of
 	// gltf/vdb/stage, enforced in parse_args above)
 	std::string sCurrentModelPath;
+	// (TODO REVIEW)
+	// set before any load: mor reads it per material as the gltf comes in
+	mor::scene_set_generated_normal_strength(args.generatedNormalStrength);
+	// (TODO REVIEW)
 	bool const startInStage = args.newStage || args.stagePath != nullptr;
 	if (args.gltfPath != nullptr) {
 		sCurrentModelPath = args.gltfPath;
@@ -764,7 +782,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		});
 	};
 	fnCreateDenoiseImages();
-	bool sDenoiseEnabled = true;
+	bool sDenoiseEnabled = false;
 
 	// bloom: extract writes into bloomAImage, then blur passes ping-pong
 	// between bloomAImage/bloomBImage (bilinear sampler reads + storage
@@ -827,7 +845,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	// backdrop-only scale on primary-ray misses (resolve.comp); the historic
 	// hard-coded 0.001 stays the default so the environment reads as distant
 	// from the scene geometry until deliberately raised
-	f32 sEnvBackgroundIntensity = 0.001f;
+	f32 sEnvBackgroundIntensity = 1.000f;
 	i32 sEnvMode = args.envMode;
 	// next-event estimation toward the env map, mis-combined with the
 	// existing bsdf-sampled technique; strictly lower variance at equal
@@ -837,7 +855,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	// diagnostic: terminate every path after its first surface hit, so a
 	// grid of test spheres (different material params) can't cross-light
 	// each other -- see GpuGlobalExtended.envMapOnlyMode
-	bool sEnvMapOnlyMode = true;
+	bool sEnvMapOnlyMode = false;
 	f32 sEnvRotation = 0.0f;
 	// applies sStage.environment onto the live (file-view-style) env state
 	// above -- called on new/open stage and --stage/--new-stage startup.

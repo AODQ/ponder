@@ -20,7 +20,7 @@
 namespace test {
 
 // set by main.cpp when vkof-test is launched with --furnace; gates the
-// opt-in full assets/Models furnace sweep in test-furnace-model-render.cpp
+// opt-in full assets/models-categorized furnace sweep in test-furnace-model-render.cpp
 // (159 models is far too slow for the default suite run)
 extern bool furnaceSweepEnabled;
 

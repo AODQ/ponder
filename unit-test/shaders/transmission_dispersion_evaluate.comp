@@ -44,6 +44,11 @@ void main() {
 
 	OpenPbrMaterial mat;
 	mat.specularIor = inBuf.data[base+0u];
+	// n_d is now the coat-affected, specular_weight-modulated ior; these are
+	// its identities, so the golden values stay the plain-specularIor cauchy fit
+	mat.specularWeight = 1.0f;
+	mat.coatWeight = 0.0f;
+	mat.coatIor = 1.0f;
 	mat.transmissionDispersionScale = inBuf.data[base+1u];
 	mat.transmissionDispersionAbbeNumber = inBuf.data[base+2u];
 

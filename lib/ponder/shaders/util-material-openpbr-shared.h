@@ -51,6 +51,10 @@ struct OpenPbrMaterial {
 
 	// glTF extras...
 	float alphaCutoff;
+	// (TODO REVIEW)
+	// MOR_ALPHA_MODE_*
+	uint alphaMode;
+	// (TODO REVIEW)
 };
 
 #endif

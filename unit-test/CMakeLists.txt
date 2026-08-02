@@ -61,6 +61,7 @@ add_executable(
 	src/test-thin-walled-subsurface.cpp
 	src/test-stage.cpp
 	src/test-blackbody.cpp
+	src/test-tangent-generation.cpp
 )
 
 # Bake absolute paths into the binary

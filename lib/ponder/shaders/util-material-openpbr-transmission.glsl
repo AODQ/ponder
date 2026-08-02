@@ -23,10 +23,27 @@
 		\tag{openpbr spec, transmission dispersion}\\
 	\end{align*}
 */
+// (TODO REVIEW)
+// the ior the base dielectric refracts and fresnels at. openpbr requires the
+// reflection and transmission sides of the same interface to share \eta'_s,
+// so specular_weight's ior modulation belongs here too, not just on the
+// reflection lobe (openpbr spec, specular: "the fresnel transmission factor
+// and refraction into and out of the base dielectric should also be
+// consistent with the IOR ratio")
+float openPbrTransmissionIor(const OpenPbrMaterial mat) {
+	return openPbrSpecularEffectiveIor(mat);
+}
+// (TODO REVIEW)
+
 // pick one of the three fraunhofer lines discretized/stochastically per-path
 vec3 openPbrDispersionIorRgb(const OpenPbrMaterial mat) {
+	// (TODO REVIEW)
+	// n_d is the modulated ior, per the spec's "specular_ior (including any
+	// modulation via specular_weight) defines n(\lambda_d)"
+	const float etaD = openPbrTransmissionIor(mat);
+	// (TODO REVIEW)
 	if (mat.transmissionDispersionScale <= 0.0f) {
-		return vec3(mat.specularIor);
+		return vec3(etaD);
 	}
 	// \lambda_F, \lambda_d, \lambda_C, in micrometers
 	const float lambdaF = 0.4861f;
@@ -41,17 +58,17 @@ vec3 openPbrDispersionIorRgb(const OpenPbrMaterial mat) {
 	const float vdSafe = vd != 0.0f ? vd : 1e-4f;
 	// B = (n_d - 1) / (V_d (\lambda_F^{-2} - \lambda_C^{-2}))
 	const float b = (
-		(mat.specularIor - 1.0f)
+		(etaD - 1.0f)
 		/ (vdSafe * (1.0f / (lambdaF * lambdaF) - 1.0f / (lambdaC * lambdaC)))
 	);
 	// A = n_d - B / \lambda_d^2
-	const float a = mat.specularIor - b / (lambdaD * lambdaD);
+	const float a = etaD - b / (lambdaD * lambdaD);
 
 	// n(\lambda) = A + B / \lambda^2, at the C/F lines;
-	// n(\lambda_d) = mat.specularIor
+	// n(\lambda_d) = etaD
 	return vec3(
 		a + b / (lambdaC * lambdaC),
-		mat.specularIor,
+		etaD,
 		a + b / (lambdaF * lambdaF)
 	);
 }

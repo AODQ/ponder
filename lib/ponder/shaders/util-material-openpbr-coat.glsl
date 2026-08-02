@@ -12,7 +12,10 @@
 	&f_{coat} = F \, D \, V \, k_{ms}
 		\tag{openpbr spec, coat}\\
 	&\textbf{(2) transmission through the coat} \\
-	&T = (1 - E(\mu_i)) (1 - E(\mu_o)) \, C_{coat} \\
+	% single directional albedo at the camera-side direction; the spec's
+	% albedo-scaling is deliberately non-reciprocal
+	&T = (1 - E_{coat}(\omega_o)) \, C_{coat}
+		\tag{openpbr spec, non-reciprocal-albedo-scaling-with-T}\\
 	&\textbf{(3) view-dependent absorption} \\
 	&\mu_i^t = \sqrt{1 - (1 - \mu_i^2) / \eta_c^2}
 		\tag{openpbr spec, coat, eq. 72}\\
@@ -128,19 +131,19 @@ vec3 openPbrCoatEvaluateF(
 		// k_{ms}
 		* coatEnergyCompensation
 	);
-	// (2) T: the interface albedo transmits through the coat bidirectionally
+	// (TODO REVIEW)
+	// (2) T: openpbr's albedo-scaling blocks the base with a *single*
+	// directional albedo at the camera-side direction (spec's \omega_o,
+	// this file's wi), which is what makes it factor out of the light
+	// integral and keeps the white furnace test exact. squaring it here
+	// with a second \omega_i term double-charged the base
 	const float coatAlbedoWi = (
-		// E(\mu_i)
+		// E(\mu_o) in spec notation
 		utilMicrofacetDielectricAlbedo(
 			wiLocal.z, mat.coatRoughness, f0
 		)
 	);
-	const float coatAlbedoWo = (
-		// E(\mu_o)
-		utilMicrofacetDielectricAlbedo(
-			max(woLocal.z, 0.0f), mat.coatRoughness, f0
-		)
-	);
+	// (TODO REVIEW)
 	// (3) view-dependent absorption: refracted cosines into the coat
 	// at entry/exit, clamped for coat-side TIR
 	const float muItSq = (
@@ -167,10 +170,10 @@ vec3 openPbrCoatEvaluateF(
 		pow(clamp(mat.coatColor, 1e-6f, 1.0f), vec3(absorptionExponent))
 	);
 	const vec3 transmittedBase = (
-		// 1 - E(\mu_i)
+		// (TODO REVIEW)
+		// 1 - E_{coat}(\omega_o)
 		(1.0f - coatAlbedoWi)
-		// 1 - E(\mu_o)
-		* (1.0f - coatAlbedoWo)
+		// (TODO REVIEW)
 		* coatAbsorption
 		* baseSubstrate
 	);
