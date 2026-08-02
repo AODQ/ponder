@@ -72,7 +72,7 @@ std::vector<EvaluateOut> run_evaluate(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thin_walled_subsurface_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thin_walled_subsurface_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -150,7 +150,7 @@ std::vector<IntegrateOut> run_integrate(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thin_walled_subsurface_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thin_walled_subsurface_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -220,7 +220,7 @@ std::vector<u32> run_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thin_walled_subsurface_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thin_walled_subsurface_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -259,7 +259,7 @@ std::vector<f32> run_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thin_walled_subsurface_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thin_walled_subsurface_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

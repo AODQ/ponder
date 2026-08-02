@@ -65,7 +65,7 @@ std::vector<u32> run_phase_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "vdb_phase_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/vdb_phase_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -110,7 +110,7 @@ std::vector<f32> run_phase_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "vdb_phase_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/vdb_phase_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -276,7 +276,7 @@ std::vector<f32> run_draine_sweep(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "vdb_phase_draine_sweep.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/vdb_phase_draine_sweep.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -1,4 +1,7 @@
 .cache/
+crashes/
+*.spirv
+*.spv
 build/
 install/
 #unit-test/output/
@@ -6,3 +9,11 @@ install/
 # git history -- re-copy from cull/assets if this directory is missing
 /assets/
 screenshots/
+
+# intermediate output of lib/tools/shared-header-to-slang.py; the copies that
+# matter live beside the other modules in lib/ponder/shaders/
+lib/ponder/shaders/generated/
+
+
+# shaderd output (pipelines compiled offline from lib/ponder/shaders)
+lib/ponder/shaders/.shader-cache/

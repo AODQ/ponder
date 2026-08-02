@@ -6,10 +6,19 @@ struct GLFWwindow;
 
 namespace ponder {
 
+// how w/a/s/d move the first-person camera; R cycles
+enum struct CameraFlyMode : u32 {
+	// stays level, only q/e change height
+	Drone,
+	// moves along the view direction
+	Free,
+};
+
 struct CameraController {
 	srat::CameraOrbit orbit {};
 	srat::CameraFirstPerson firstPerson {};
 	bool isFirstPerson = false;
+	CameraFlyMode flyMode = CameraFlyMode::Drone;
 	f32 flySpeedMultiplier = 0.5f;
 
 	// frame-to-frame input state; camera_controller_update owns these
@@ -17,6 +26,7 @@ struct CameraController {
 	f64 prevMouseY = 0.0;
 	bool mouseInitialized = false;
 	bool tabWasDown = false;
+	bool rWasDown = false;
 };
 
 [[nodiscard]] CameraController camera_controller_create(
@@ -30,6 +40,10 @@ void camera_controller_sync_orbit_from_fp(CameraController & c);
 // chains into whatever glfw scroll handler is already installed (imgui's)
 // instead of replacing it; call once after the window exists
 void camera_controller_install_scroll_callback(GLFWwindow * const window);
+
+// drops scroll gathered while camera_controller_update was not called, so it
+// does not zoom once the update resumes
+void camera_controller_scroll_discard();
 
 // returns true if the camera moved this frame
 bool camera_controller_update(

@@ -1,0 +1,10 @@
+{
+  "GpuMorMeshletBuffer": "GpuMorMeshlet",
+  "GpuMorInstanceBuffer": "GpuMorInstance",
+  "GpuMorPositionBuffer": "f32v3",
+  "GpuMorVertexAttributeBuffer": "GpuMorVertexAttribute",
+  "GpuMorMeshletVertBuffer": "u32",
+  "GpuMorMeshletTriBuffer": "uint8_t",
+  "GpuMorMaterialBuffer": "GpuMorMaterial",
+  "GpuMorUvTransformBuffer": "GpuMorUvTransform"
+}

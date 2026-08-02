@@ -97,7 +97,7 @@ static_assert(sizeof(SamplingStatsPush) == 48);
 std::vector<u32> run_histogram(u32 const sampleCount, u32 const seedSalt) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -137,7 +137,7 @@ std::vector<u32> run_histogram(u32 const sampleCount, u32 const seedSalt) {
 std::vector<f32> run_expected(u32 const sampleCount) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -246,7 +246,7 @@ TEST_CASE("diffuse sampling: core mapping matches materialx mx_cosine_sample_hem
 		flat.push_back(rng.next());
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "diffuse_sample_crosscheck.comp", flat, 2u, 8u
+		TEST_SHADER_DIR "slang/entry/diffuse_sample_crosscheck.slang", flat, 2u, 8u
 	);
 	for (u32 i = 0; i < out.size() / 8u; ++i) {
 		CAPTURE(i);
@@ -271,7 +271,7 @@ TEST_CASE("diffuse pdf: golden values") {
 		flat.push_back(0.0f);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "diffuse_sample_crosscheck.comp", flat, 2u, 8u
+		TEST_SHADER_DIR "slang/entry/diffuse_sample_crosscheck.slang", flat, 2u, 8u
 	);
 	for (u32 i = 0; i < cosines.size(); ++i) {
 		CAPTURE(cosines[i]);
@@ -296,7 +296,7 @@ TEST_CASE("diffuse sampler: unit, above horizon, finite, pass-through equality (
 		flat.push_back(rng.next()); flat.push_back(rng.next());
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "diffuse_sample_evaluate.comp", flat, 5u, 10u
+		TEST_SHADER_DIR "slang/entry/diffuse_sample_evaluate.slang", flat, 5u, 10u
 	);
 	u32 lenFailures = 0u;
 	u32 horizonFailures = 0u;
@@ -388,7 +388,7 @@ TEST_CASE("diffuse sampler: closed-form mean direction") {
 		flat.push_back(rng.next()); flat.push_back(rng.next());
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "diffuse_sample_evaluate.comp", flat, 5u, 10u
+		TEST_SHADER_DIR "slang/entry/diffuse_sample_evaluate.slang", flat, 5u, 10u
 	);
 	f64 mx = 0.0, my = 0.0, mz = 0.0;
 	for (u32 i = 0; i < kCount; ++i) {

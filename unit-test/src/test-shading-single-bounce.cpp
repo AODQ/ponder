@@ -203,7 +203,8 @@ TEST_CASE("shading: single-bounce direct light matches cpu quadrature") {
 	vkof::acceleration_structure_set_tlas(scene.tlas);
 
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "single_bounce_direct_light.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/single_bounce_direct_light.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(pl.id != 0);
 

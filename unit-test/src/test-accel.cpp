@@ -152,7 +152,8 @@ TEST_CASE("accel: ray query hit and miss") {
 	vkof::acceleration_structure_set_tlas(tlas);
 
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ray_query.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ray_query.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(pl.id != 0);
 

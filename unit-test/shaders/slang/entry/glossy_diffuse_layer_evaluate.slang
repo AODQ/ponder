@@ -1,0 +1,120 @@
+import "util-random";
+import "util-material-openpbr-tables";
+import "util-material-openpbr-thinfilm";
+import "util-material-openpbr-microfacet";
+import "util-material-openpbr-diffuse";
+import "util-material-openpbr-shared";
+
+struct PC {
+	u32v4 rootPad[8];
+	u64 inVa;
+	u64 outVa;
+	u32 count;
+};
+
+[[vk::push_constant]] PC pc;
+
+// constants normally provided by util-material-openpbr.glsl; the full
+// material include chain pulls in every lobe, so the diffuse-only prelude
+// is replicated here instead (values must match util-material-openpbr.glsl)
+static const f32 skFon1 = 0.5f - 2.0f / (3.0f * PI);
+static const f32 skFon2 = 2.0f / 3.0f - 28.0f / (15.0f * PI);
+
+// M_{glossy-diffuse} = layer(S_{diffuse}, S_{gloss}), isolated from
+// openPbrEvaluateF (util-material-openpbr.glsl) with coatWeight pinned to
+// 0 -- no coat/fuzz/metal/subsurface/transmission above or below this
+// layer, matching the openpbr spec's own scope for this term. every line
+// below (etaEff/etaRel/f0Eff, fDiffuse, fSpecular,
+// roughenedSpecularRoughness, fSpecularDirectionalAlbedo, the final
+// combination) is copied verbatim from openPbrEvaluateF -- same function
+// (the mat-struct openPbrDielectricSpecularEvaluateF overload in
+// util-material-openpbr-microfacet.glsl, not the standalone one in
+// util-dielectric-specular.glsl), same call shape, only isInsideMedium's
+// branch and the mix() calls against fSubsurface/fConductor/fCoatedBase/
+// fSurface removed since this layer sits below all of those.
+func openPbrGlossyDiffuseLayerEvaluateF(
+	mat: OpenPbrMaterial,
+	frame: ShadingFrame,
+	wi: f32v3,
+	wo: f32v3,
+) -> f32v3 {
+	const f32v3 nor = frame.nor;
+
+	const f32 etaEff = openPbrEffectiveIor(mat.specularIor, mat.specularWeight);
+	const f32 etaRel = etaEff;
+	const f32 iorRatio = (etaEff - 1.0f) / (etaEff + 1.0f);
+	const f32 f0Eff = iorRatio * iorRatio;
+
+	const f32v3 fDiffuse = (
+		openPbrGlossyDiffuseOrenNayerEvaluateF(mat, nor, wi, wo)
+	);
+
+	const f32v3 fSpecular = (
+		openPbrDielectricSpecularEvaluateF(mat, frame, wi, wo, etaRel)
+		* mat.specularColor
+	);
+	const f32 roughenedSpecularRoughness = (
+		openPbrCoatRoughenedRoughness(
+			mat.specularRoughness, mat.coatRoughness, mat.coatWeight
+		)
+	);
+	const f32 fSpecularDirectionalAlbedo = (
+		utilMicrofacetDielectricAlbedo(
+			dot(nor, wi), roughenedSpecularRoughness, f0Eff
+		)
+	);
+
+	return fSpecular + ((1.0f - fSpecularDirectionalAlbedo) * fDiffuse);
+}
+
+// per sample, 16 floats:
+//   wi.xyz, wo.xyz,
+//   baseDiffuseRoughness, baseWeight, baseColor.rgb,
+//   specularWeight, specularColor (single scalar, splatted to rgb --
+//     tinted specular is openPbrFresnelMetallicEvaluateF's turf, not this
+//     layer's, so it's not exercised here),
+//   specularRoughness, specularRoughnessAnisotropy, specularIor
+// anisotropy rotation is fixed at 0 (already covered by the shading-frame
+// rotation tests elsewhere). surface normal is fixed to (0,0,1), wi/wo
+// supplied directly in that local space.
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void main(
+	const u32v3 gl_GlobalInvocationID : SV_DispatchThreadID,
+) {
+	u32 i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) { return; }
+	f32 * inBuf = (f32 *)(pc.inVa);
+	u32 base = i * 16u;
+	const f32v3 wi = (
+		f32v3(inBuf[base+0u], inBuf[base+1u], inBuf[base+2u])
+	);
+	const f32v3 wo = (
+		f32v3(inBuf[base+3u], inBuf[base+4u], inBuf[base+5u])
+	);
+
+	OpenPbrMaterial mat;
+	mat.baseDiffuseRoughness = inBuf[base+6u];
+	mat.baseWeight = inBuf[base+7u];
+	mat.baseColor = (
+		f32v3(inBuf[base+8u], inBuf[base+9u], inBuf[base+10u])
+	);
+	mat.specularWeight = inBuf[base+11u];
+	mat.specularColor = f32v3(inBuf[base+12u]);
+	mat.specularRoughness = inBuf[base+13u];
+	mat.specularRoughnessAnisotropy = inBuf[base+14u];
+	mat.specularRoughnessAnisotropyRotation = 0.0f;
+	mat.specularIor = inBuf[base+15u];
+	mat.coatWeight = 0.0f;
+	mat.coatRoughness = 0.0f;
+	mat.thinFilmWeight = 0.0f;
+
+	ShadingFrame frame;
+	frame.tanX = f32v3(1.0f, 0.0f, 0.0f);
+	frame.tanY = f32v3(0.0f, 1.0f, 0.0f);
+	frame.nor = f32v3(0.0f, 0.0f, 1.0f);
+
+	const f32v3 f = openPbrGlossyDiffuseLayerEvaluateF(mat, frame, wi, wo);
+	((f32v3 *)(pc.outVa))[i] = f;
+}

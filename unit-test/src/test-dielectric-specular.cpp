@@ -80,13 +80,13 @@ std::vector<f32v3> evaluate_lobe(
 }
 
 std::vector<f32v3> evaluate_dielectric_specular(std::vector<f32> const & samplesFlat) {
-	return evaluate_lobe(samplesFlat, "dielectric_specular_evaluate.comp");
+	return evaluate_lobe(samplesFlat, "slang/entry/dielectric_specular_evaluate.slang");
 }
 
 std::vector<f32v3> evaluate_dielectric_specular_uncompensated(
 	std::vector<f32> const & samplesFlat
 ) {
-	return evaluate_lobe(samplesFlat, "dielectric_specular_uncompensated_evaluate.comp");
+	return evaluate_lobe(samplesFlat, "slang/entry/dielectric_specular_uncompensated_evaluate.slang");
 }
 
 std::vector<f32> evaluate_furnace(
@@ -96,7 +96,7 @@ std::vector<f32> evaluate_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "dielectric_specular_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_specular_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

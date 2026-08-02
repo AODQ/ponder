@@ -183,7 +183,7 @@ SelectionCrosscheckResult run_selection_crosscheck(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_selection_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_selection_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -338,7 +338,7 @@ HistogramResult run_mixture_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -415,7 +415,7 @@ std::vector<f32> run_mixture_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -790,7 +790,7 @@ std::vector<f32> run_edge_sweep(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_edge_sweep.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_edge_sweep.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -941,7 +941,7 @@ TEST_CASE("DEBUG: single point breakdown, diffuse+specular near mirror") {
 	};
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_debug_point.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_debug_point.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -1005,7 +1005,7 @@ TEST_CASE("DEBUG: sub-grid scan, transmission+specular outlier bin") {
 	};
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_debug_point.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_debug_point.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -1076,7 +1076,7 @@ TEST_CASE("DEBUG: sub-grid scan, horizon-straddling bin 20 gap") {
 	};
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "mixture_debug_point.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/mixture_debug_point.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

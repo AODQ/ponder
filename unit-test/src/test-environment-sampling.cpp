@@ -146,7 +146,7 @@ std::vector<u32> run_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "environment_sampling_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/environment_sampling_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -190,7 +190,7 @@ std::vector<f32> run_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "environment_sampling_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/environment_sampling_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -348,7 +348,7 @@ std::vector<f32> run_sweep(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "environment_map_sweep.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/environment_map_sweep.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

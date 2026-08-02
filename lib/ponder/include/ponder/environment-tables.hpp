@@ -28,6 +28,14 @@ struct EnvironmentTables {
 	u32 width;
 	u32 height;
 	u32 radianceMipCount;
+	// (TODO REVIEW)
+	// \int luma(L) d\omega over the sphere at intensity 1. the emitter light
+	// list needs a power for the environment entry, and this is the only
+	// quantity of the map that is comparable to a mesh emitter's
+	// area * radiance -- both are "how much this emitter is worth sampling",
+	// steering only
+	f32 luminanceIntegral;
+	// (TODO REVIEW)
 };
 
 EnvironmentTables environment_tables_create(const std::string & path);

@@ -1,4 +1,5 @@
 #include <vkof/vkof.hpp>
+#include <vkof/shader-cache.hpp>
 #include <srat/core-handle.hpp>
 #include <srat/profile.hpp>
 
@@ -15,10 +16,21 @@
 #include "aftermath.hpp"
 #endif
 
+#if defined(PONDER_DLSS)
+#include "ngx-internal.hpp"
+#endif
+
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -189,6 +201,7 @@ static bool file_changed(
 	std::filesystem::file_time_type const & lastWriteTime
 );
 static void pipeline_hot_reload();
+static void shader_cache_shutdown();
 static void profiler_init();
 
 static VkFormat to_vk_format(vkof::ImageFormat format) {
@@ -394,6 +407,16 @@ namespace
 		std::vector<ImplColorAttachment> colorAttachments;
 		std::optional<ImplDepthAttachment> depthAttachment;
 		std::function<void(vkof::CommandBuffer const &)> callback;
+		std::string debugName;
+	};
+
+	// shown in the "shader compiler" imgui window
+	struct ImplShaderStatus
+	{
+		std::string lastError {};
+		std::chrono::system_clock::time_point lastCompileTime {};
+		// set a frame before compiling, so one presented frame shows it
+		bool reloadPending { false };
 	};
 
 	struct ImplPipelineGraphics
@@ -415,6 +438,8 @@ namespace
 
 		std::vector<std::string> dependencyPaths;
 		std::vector<std::filesystem::file_time_type> dependencyWriteTimes;
+
+		ImplShaderStatus status {};
 	};
 
 	struct ImplPipelineCompute
@@ -422,12 +447,20 @@ namespace
 		VkPipeline pipeline;
 		VkPipelineLayout layout;
 		std::string pathCompute;
+		std::string debugName;
 		std::vector<std::string> defines;
 		std::vector<std::string> includePaths;
 		std::filesystem::file_time_type lastWriteTimeCompute;
 
 		std::vector<std::string> dependencyPaths;
 		std::vector<std::filesystem::file_time_type> dependencyWriteTimes;
+
+		// shaderd artifact key; empty when compiled in-process
+		std::string cacheKey {};
+		u64 cacheGeneration { 0 };
+		bool cacheDeferred { false };
+
+		ImplShaderStatus status {};
 	};
 
 	struct PerFrameData {
@@ -444,6 +477,18 @@ namespace
 		double gpuMs { 0.0 };
 	};
 
+	struct ProfilerDispatchCount {
+		vkof::Pipeline pipeline;
+		u32 count;
+	};
+
+	// one line of the profiler window, under its section header
+	struct ProfilerRow {
+		std::string section;
+		std::string label;
+		double value;
+	};
+
 	struct Profiler {
 		VkQueryPool queryPool { VK_NULL_HANDLE };
 		double timestampPeriodMs { 0.0 };
@@ -454,6 +499,22 @@ namespace
 		std::array<NodeTiming, kMaxProfiledNodes> timings {};
 		u32 displayCount { 0 };
 		u32 frameNodeCount { 0 };
+
+		// -- this frame
+		std::array<std::string, kMaxProfiledNodes> nodeNames {};
+		std::array<std::vector<ProfilerDispatchCount>, kMaxProfiledNodes>
+			nodeDispatches {};
+		// node whose callback is recording, ~0u outside of one
+		u32 recordingNode { ~0u };
+		std::vector<ProfilerRow> values {};
+
+		// -- averaging window
+		std::chrono::steady_clock::time_point windowStart {};
+		u32 windowFrames { 0 };
+		// sums over the window, in first-seen order
+		std::vector<ProfilerRow> windowSums {};
+		// the averages of the last finished window
+		std::vector<ProfilerRow> display {};
 	};
 
 	struct ImplDevice {
@@ -546,6 +607,15 @@ namespace
 			pfnGetAccelerationStructureDeviceAddressKHR { nullptr };
 		PFN_vkCmdBuildAccelerationStructuresKHR
 			pfnCmdBuildAccelerationStructuresKHR { nullptr };
+		PFN_vkCreatePipelineBinariesKHR pfnCreatePipelineBinariesKHR
+			{ nullptr };
+		PFN_vkDestroyPipelineBinaryKHR pfnDestroyPipelineBinaryKHR { nullptr };
+		PFN_vkGetPipelineBinaryDataKHR pfnGetPipelineBinaryDataKHR { nullptr };
+		PFN_vkGetPipelineExecutablePropertiesKHR
+			pfnGetPipelineExecutablePropertiesKHR { nullptr };
+		PFN_vkGetPipelineExecutableStatisticsKHR
+			pfnGetPipelineExecutableStatisticsKHR { nullptr };
+		bool maintenance5 { false };
 	};
 }
 static std::filesystem::file_time_type file_write_time(std::string const & p) {
@@ -555,6 +625,10 @@ static std::filesystem::file_time_type file_write_time(std::string const & p) {
 }
 
 static ImplDevice * sDevice;
+#if defined(PONDER_DLSS)
+// this frame's root push constants, re-pushed after ngx commands
+static std::vector<u8> sRootPushconstant;
+#endif
 
 static PFN_vkCmdDrawMeshTasksEXT pfnVkCmdDrawMeshTasksEXT;
 static PFN_vkSetDebugUtilsObjectNameEXT pfnSetDebugName;
@@ -2352,6 +2426,7 @@ vkof::RenderNode vkof::render_node_create(
 ) {
 	ImplRenderNode impl;
 	impl.queue = createInfo.queue;
+	impl.debugName = createInfo.debugName ? createInfo.debugName : "";
 	return sDevice->renderNodePool.allocate(impl);
 }
 
@@ -2445,7 +2520,9 @@ void vkof::render_node_callback(RenderNodeCallbackInfo const & info)
 
 static void init_impl(
 	bool const isHeadless, u32 const & width, u32 const & height,
-	bool const enableValidation
+	bool const enableValidation,
+	char const * const appName,
+	[[maybe_unused]] bool const withNgx
 )
 {
 #if defined(VKOF_AFTERMATH)
@@ -2465,28 +2542,51 @@ static void init_impl(
 		);
 	}
 
+#if defined(PONDER_DLSS)
+	std::vector<char const *> ngxInstanceExtensions;
+	std::vector<char const *> ngxDeviceExtensions;
+	if (withNgx) {
+		vkof::ngx::required_extensions(ngxInstanceExtensions, ngxDeviceExtensions);
+	}
+#endif
+
 	// -- instance
 	auto instance = [&]() -> vkb::Instance {
 		vkb::InstanceBuilder builder;
+#if defined(PONDER_DLSS)
+		{
+			auto const systemInfo = vkb::SystemInfo::get_system_info();
+			for (char const * const extension : ngxInstanceExtensions) {
+				if (systemInfo && systemInfo->is_extension_available(extension)) {
+					builder.enable_extension(extension);
+				}
+			}
+		}
+#endif
 		builder
-			.set_app_name(isHeadless ? "vkof-test" : "demo")
-			.request_validation_layers(enableValidation)
-			.require_api_version(1, 3, 0);
-		// debug_printf (util-nan-probe.glsl, the material inspector probe,
-		// etc.) and validation_message/probe_message both depend on the
-		// validation layer being active in the first place; configuring
-		// the messenger/feature-enable when it wasn't requested is
-		// meaningless at best, so this whole group stays conditional
-		// rather than just the layer request above
-		if (enableValidation) {
-			builder
-				.set_debug_callback(debugMessengerCallback)
-				.add_debug_messenger_severity(
-					VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
-				)
-				.add_validation_feature_enable(
-					VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT
-				);
+			.set_app_name(appName)
+			.request_validation_layers(true)
+			.require_api_version(1, 3, 0)
+			.set_debug_callback(debugMessengerCallback)
+			.add_debug_messenger_severity(
+				VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
+			)
+			.add_validation_feature_enable(
+				VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT
+			);
+		if (!enableValidation) {
+			VkValidationFeatureDisableEXT const printfOnlyDisables[] = {
+				VK_VALIDATION_FEATURE_DISABLE_CORE_CHECKS_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_THREAD_SAFETY_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_API_PARAMETERS_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_OBJECT_LIFETIMES_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_UNIQUE_HANDLES_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_SHADERS_EXT,
+				VK_VALIDATION_FEATURE_DISABLE_SHADER_VALIDATION_CACHE_EXT,
+			};
+			for (VkValidationFeatureDisableEXT const disable : printfOnlyDisables) {
+				builder.add_validation_feature_disable(disable);
+			}
 		}
 		if (isHeadless) {
 			builder.set_headless(true);
@@ -2516,6 +2616,9 @@ static void init_impl(
 	}
 
 	// -- device
+	bool pipelineBinarySupported = false;
+	bool maintenance5Supported = false;
+	bool executableInfoSupported = false;
 	auto device = [&]() -> vkb::Device {
 		VkPhysicalDeviceFeatures features {
 			.robustBufferAccess = true,
@@ -2729,7 +2832,76 @@ static void init_impl(
 			);
 			exit(1);
 		}
-		vkb::DeviceBuilder devBuilder(physResult.value());
+		// -- optional pipeline binaries, for shaderd's precompiled pipelines
+		vkb::PhysicalDevice physical = physResult.value();
+		VkPhysicalDeviceMaintenance5FeaturesKHR const maintenance5Features = {
+			.sType = (
+				VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR
+			),
+			.pNext = nullptr,
+			.maintenance5 = VK_TRUE,
+		};
+		VkPhysicalDevicePipelineBinaryFeaturesKHR const binaryFeatures = {
+			.sType = (
+				VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR
+			),
+			.pNext = nullptr,
+			.pipelineBinaries = VK_TRUE,
+		};
+		bool const maintenance5 = (
+			physical.is_extension_present(VK_KHR_MAINTENANCE_5_EXTENSION_NAME)
+			&& physical.enable_extension_features_if_present(maintenance5Features)
+		);
+		if (maintenance5) {
+			physical.enable_extension_if_present(
+				VK_KHR_MAINTENANCE_5_EXTENSION_NAME
+			);
+		}
+		pipelineBinarySupported = (
+			maintenance5
+			&& physical.is_extension_present(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME)
+			&& physical.enable_extension_features_if_present(binaryFeatures)
+		);
+		if (pipelineBinarySupported) {
+			physical.enable_extension_if_present(
+				VK_KHR_PIPELINE_BINARY_EXTENSION_NAME
+			);
+		}
+		maintenance5Supported = maintenance5;
+
+		// -- optional pipeline statistics, for shaderd's reports
+		VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR const
+			executableFeatures = {
+				.sType = (
+					VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR
+				),
+				.pNext = nullptr,
+				.pipelineExecutableInfo = VK_TRUE,
+			};
+		executableInfoSupported = (
+			physical.is_extension_present(
+				VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
+			)
+			&& physical.enable_extension_features_if_present(executableFeatures)
+		);
+		if (executableInfoSupported) {
+			physical.enable_extension_if_present(
+				VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
+			);
+		}
+#if defined(PONDER_DLSS)
+		for (char const * const extension : ngxDeviceExtensions) {
+			// core in 1.2 and enabled through vulkan12Features, which the
+			// extension must not be combined with
+			bool const promoted = (
+				strcmp(extension, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0
+			);
+			if (!promoted) {
+				physical.enable_extension_if_present(extension);
+			}
+		}
+#endif
+		vkb::DeviceBuilder devBuilder(physical);
 #if defined(VKOF_AFTERMATH)
 		VkDeviceDiagnosticsConfigCreateInfoNV const diagnosticsConfigCi = {
 			.sType = (
@@ -3269,6 +3441,38 @@ static void init_impl(
 		);
 	}
 
+	sDevice->maintenance5 = maintenance5Supported;
+	if (executableInfoSupported) {
+		sDevice->pfnGetPipelineExecutablePropertiesKHR = (
+			(PFN_vkGetPipelineExecutablePropertiesKHR)
+			vkGetDeviceProcAddr(
+				sDevice->device, "vkGetPipelineExecutablePropertiesKHR"
+			)
+		);
+		sDevice->pfnGetPipelineExecutableStatisticsKHR = (
+			(PFN_vkGetPipelineExecutableStatisticsKHR)
+			vkGetDeviceProcAddr(
+				sDevice->device, "vkGetPipelineExecutableStatisticsKHR"
+			)
+		);
+	}
+
+	// -- pipeline binaries
+	if (pipelineBinarySupported) {
+		sDevice->pfnCreatePipelineBinariesKHR = (
+			(PFN_vkCreatePipelineBinariesKHR)
+			vkGetDeviceProcAddr(sDevice->device, "vkCreatePipelineBinariesKHR")
+		);
+		sDevice->pfnDestroyPipelineBinaryKHR = (
+			(PFN_vkDestroyPipelineBinaryKHR)
+			vkGetDeviceProcAddr(sDevice->device, "vkDestroyPipelineBinaryKHR")
+		);
+		sDevice->pfnGetPipelineBinaryDataKHR = (
+			(PFN_vkGetPipelineBinaryDataKHR)
+			vkGetDeviceProcAddr(sDevice->device, "vkGetPipelineBinaryDataKHR")
+		);
+	}
+
 	// -- per-frame-in-flight: command buffers, semaphores, fences
 	{
 		VkCommandBufferAllocateInfo const cbai = {
@@ -3395,11 +3599,17 @@ static void init_impl(
 	}
 
 	profiler_init();
+
+#if defined(PONDER_DLSS)
+	if (withNgx) {
+		vkof::ngx::init();
+	}
+#endif
 }
 
 void vkof::init(bool const enableValidation)
 {
-	init_impl(false, 1920u, 1080u, enableValidation);
+	init_impl(false, 1920u, 1080u, enableValidation, "demo", true);
 }
 
 void vkof::init_headless(u32 const width, u32 const height)
@@ -3409,7 +3619,15 @@ void vkof::init_headless(u32 const width, u32 const height)
 	// validation_message capture for its own assertions, so this stays
 	// unconditionally on -- only the windowed vkof::init() startup-time
 	// path (see its own comment) is meant to ever disable it
-	init_impl(true, width, height, /*enableValidation=*/true);
+	init_impl(
+		true, width, height, /*enableValidation=*/true, "vkof-test", true
+	);
+}
+
+void vkof::init_shader_compiler()
+{
+	// same app name as the windowed renderer, so driver profiles match
+	init_impl(true, 64u, 64u, /*enableValidation=*/false, "demo", false);
 }
 
 void vkof::device_wait_idle()
@@ -3420,6 +3638,10 @@ void vkof::device_wait_idle()
 void vkof::shutdown()
 {
 	vkDeviceWaitIdle(sDevice->device);
+#if defined(PONDER_DLSS)
+	vkof::ngx::shutdown();
+#endif
+	shader_cache_shutdown();
 
 	if (sDevice->profiler.queryPool != VK_NULL_HANDLE) {
 		vkDestroyQueryPool(sDevice->device, sDevice->profiler.queryPool, nullptr);
@@ -3559,6 +3781,11 @@ void vkof::shutdown()
 // -- pipeline creation
 // -----------------------------------------------------------------------------
 
+static VkPipeline compute_pipeline_create_vk(
+	VkShaderModule const module,
+	void const * const pNext
+);
+
 static VkPipeline build_compute_pipeline(
 	ImplPipelineCompute const & impl
 )
@@ -3572,18 +3799,29 @@ static VkPipeline build_compute_pipeline(
 	if (computeShaderModule == VK_NULL_HANDLE) {
 		return VK_NULL_HANDLE;
 	}
+	VkPipeline const pipeline = (
+		compute_pipeline_create_vk(computeShaderModule, nullptr)
+	);
+	vkDestroyShaderModule(sDevice->device, computeShaderModule, nullptr);
+	return pipeline;
+}
+
+static VkPipeline compute_pipeline_create_vk(
+	VkShaderModule const module,
+	void const * const pNext
+) {
 	VkPipelineShaderStageCreateInfo const shaderStageCi = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
 		.pNext = nullptr,
 		.flags = 0,
 		.stage = VK_SHADER_STAGE_COMPUTE_BIT,
-		.module = computeShaderModule,
+		.module = module,
 		.pName = "main",
 		.pSpecializationInfo = nullptr,
 	};
 	VkComputePipelineCreateInfo const pipelineCi = {
 		.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-		.pNext = nullptr,
+		.pNext = pNext,
 		.flags = 0,
 		.stage = shaderStageCi,
 		.layout = sDevice->pipelineLayoutUniversal,
@@ -3599,7 +3837,6 @@ static VkPipeline build_compute_pipeline(
 		nullptr, // allocator
 		&pipeline
 	);
-	vkDestroyShaderModule(sDevice->device, computeShaderModule, nullptr);
 	if (result != VK_SUCCESS) {
 		printf("failed to create compute pipeline: %d\n", result);
 		return VK_NULL_HANDLE;
@@ -4052,9 +4289,9 @@ vkof::Pipeline vkof::debug_sphere_pipeline_create(
 // -- shader compilation
 // -----------------------------------------------------------------------------
 
-// last compile error, surfaced so a failed hot reload can be shown
-// rather than crashing the session.
-static std::string sLastCompileError;
+// last compile error of this thread, surfaced so a failed hot reload can be
+// shown rather than crashing the session.
+static thread_local std::string sLastCompileError;
 
 static char const * shader_stage_flag(ShaderStage const & stage) {
 	switch (stage) {
@@ -4064,6 +4301,21 @@ static char const * shader_stage_flag(ShaderStage const & stage) {
 	}
 	return "vert";
 }
+
+// (TODO REVIEW)
+static char const * shader_stage_flag_slang(ShaderStage const & stage) {
+	switch (stage) {
+		case ShaderStage::fragment: return "fragment";
+		case ShaderStage::compute:  return "compute";
+		case ShaderStage::mesh:     return "mesh";
+	}
+	return "vertex";
+}
+
+static bool shader_path_is_slang(std::string const & path) {
+	return path.size() > 6u && path.compare(path.size() - 6u, 6u, ".slang") == 0;
+}
+// (TODO REVIEW)
 
 static CompileResult system_capture(char const * cmd) {
 	std::string output;
@@ -4077,65 +4329,107 @@ static CompileResult system_capture(char const * cmd) {
 	return { status, output };
 }
 
-// compiles glsl -> spv, returns the module. on failure returns
-// VK_NULL_HANDLE and leaves sLastCompileError set (caller decides whether
-// to keep the old pipeline or abort).
+static VkShaderModule shader_module_create(std::string_view const code);
+
+// compiles glsl (or slang, by .slang extension) -> spv, returns the module.
+// on failure returns VK_NULL_HANDLE and leaves sLastCompileError set (caller
+// decides whether to keep the old pipeline or abort).
 static VkShaderModule compile_and_load_shader_module(
-	std::string const & glslPath,
+	std::string const & sourcePath,
 	ShaderStage stage,
 	std::vector<std::string> const & defines,
 	std::vector<std::string> const & includePaths
 ) {
 	std::string const shaderDir = (
-		glslPath.substr(0, glslPath.rfind('/') + 1)
+		sourcePath.substr(0, sourcePath.rfind('/') + 1)
 	);
 	std::string const baseName = (
-		glslPath.substr(glslPath.rfind('/') + 1)
+		sourcePath.substr(sourcePath.rfind('/') + 1)
 	);
 	std::string const binDir = shaderDir + "bin";
-	std::string const spvPath = binDir + "/" + baseName + ".spv";
-	std::filesystem::create_directories(binDir);
+	// each define set gets its own output, so variants can compile at once
+	std::string defineKey;
+	for (std::string const & d : defines) {
+		defineKey += d + ";";
+	}
+	char defineHash[32] = "";
+	if (!defines.empty()) {
+		snprintf(
+			defineHash,
+			sizeof(defineHash),
+			"-%016zx",
+			std::hash<std::string> {}(defineKey)
+		);
+	}
+	std::string const spvPath = binDir + "/" + baseName + defineHash + ".spv";
+	std::error_code createError;
+	std::filesystem::create_directories(binDir, createError);
 
-	std::string cmd = (
-		std::string("glslangValidator -S ")
-		+ shader_stage_flag(stage)
-		+ " --target-env vulkan1.3"
+	// (TODO REVIEW)
+	std::string cmd;
+	if (shader_path_is_slang(sourcePath)) {
+		// -- slang: column-major and scalar layout match the glsl shaders
+		cmd = (
+			std::string("slangc -target spirv -stage ")
+			+ shader_stage_flag_slang(stage)
+			+ " -entry main"
+			+ " -matrix-layout-column-major"
+			+ " -force-glsl-scalar-layout"
+			// (TODO REVIEW)
+			// no -g under aftermath: slangc 2026.x asserts in debug-info
+			// emission (slang-ir.cpp(5810): structType) on
+			// openPbrLoadMaterialDeriv and utilEmitterSample. slang shaders
+			// lose source mapping in crash dumps; glsl keeps -gVS below
+			// (TODO REVIEW)
+		);
+	} else {
+		// -- glsl
+		cmd = (
+			std::string("glslangValidator -S ")
+			+ shader_stage_flag(stage)
+			+ " --target-env vulkan1.3"
 #if defined(VKOF_AFTERMATH)
-		+ " -gVS"
+			+ " -gVS"
 #endif
-	);
+		);
+	}
+	// (TODO REVIEW)
 	for (std::string const & d : defines) {
 		cmd += " -D" + d;
 	}
 	for (std::string const & p : includePaths) {
 		cmd += " -I" + p;
 	}
-	cmd += " -o " + spvPath + " " + glslPath;
+	// slangc reports diagnostics on stderr; popen only captures stdout
+	cmd += " -o " + spvPath + " " + sourcePath + " 2>&1";
 	CompileResult const result = system_capture(cmd.c_str());
 	if (result.exitCode != 0) {
 		printf(
 			"failed to compile shader %s:\n%s\n",
-			glslPath.c_str(), result.output.c_str()
+			sourcePath.c_str(), result.output.c_str()
 		);
 		sLastCompileError = result.output;
 		return VK_NULL_HANDLE;
 	}
 	sLastCompileError.clear();
 
-	FILE * f = fopen(spvPath.c_str(), "rb");
-	if (!f) {
+	std::optional<std::string> const code = (
+		vkof::shader_cache::file_read(spvPath)
+	);
+	if (!code) {
 		printf("failed to open compiled spv: %s\n", spvPath.c_str());
 		return VK_NULL_HANDLE;
 	}
-	fseek(f, 0, SEEK_END);
-	size_t const size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	std::vector<u8> code(size);
-	fread(code.data(), 1, size, f);
-	fclose(f);
+	return shader_module_create(*code);
+}
 
+static VkShaderModule shader_module_create(std::string_view const code) {
 #if defined(VKOF_AFTERMATH)
-	vkof_aftermath_register_spirv(code.data(), (uint32_t)code.size());
+	{
+		static std::mutex sAftermathMutex;
+		std::lock_guard<std::mutex> const lock(sAftermathMutex);
+		vkof_aftermath_register_spirv(code.data(), (uint32_t)code.size());
+	}
 #endif
 
 	VkShaderModuleCreateInfo const ci = {
@@ -4146,13 +4440,80 @@ static VkShaderModule compile_and_load_shader_module(
 		.pCode = (u32 const *)code.data(),
 	};
 	VkShaderModule mod;
-	VkAssert(vkCreateShaderModule(sDevice->device, &ci, nullptr, &mod));
+	VkResult const result = (
+		vkCreateShaderModule(sDevice->device, &ci, nullptr, &mod)
+	);
+	if (result != VK_SUCCESS) { return VK_NULL_HANDLE; }
 	return mod;
 }
 
 // -----------------------------------------------------------------------------
 // -- shader dependency tracking
 // -----------------------------------------------------------------------------
+
+struct ShaderLineDependency {
+	std::string name;
+	bool isAngle;
+};
+
+// file a line pulls in via `#include`, slang `__include`, or slang `import`;
+// empty name if none. bare module names map like slang: a.b_c -> a/b-c.slang
+static ShaderLineDependency shader_line_dependency(std::string const & line) {
+	auto const fnSkipSpace = [&](size_t i) -> size_t {
+		while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) {
+			++i;
+		}
+		return i;
+	};
+	// keyword followed by whitespace or a quote, so `imported` doesn't match
+	auto const fnKeyword = [&](size_t const i, std::string const & word) -> bool {
+		if (line.compare(i, word.size(), word) != 0) { return false; }
+		size_t const next = i + word.size();
+		return (
+			next < line.size()
+			&& (line[next] == ' ' || line[next] == '\t' || line[next] == '"')
+		);
+	};
+
+	size_t i = fnSkipSpace(0u);
+	bool isSlang = true;
+	if (i < line.size() && line[i] == '#') {
+		i = fnSkipSpace(i + 1u);
+		if (line.compare(i, 7u, "include") != 0) { return {}; }
+		i = fnSkipSpace(i + 7u);
+		isSlang = false;
+	} else if (fnKeyword(i, "__include")) {
+		i = fnSkipSpace(i + 9u);
+	} else {
+		if (fnKeyword(i, "__exported")) {
+			i = fnSkipSpace(i + 10u);
+		}
+		if (!fnKeyword(i, "import")) { return {}; }
+		i = fnSkipSpace(i + 6u);
+	}
+	if (i >= line.size()) { return {}; }
+
+	std::string name;
+	bool const isAngle = line[i] == '<';
+	if (line[i] == '"' || isAngle) {
+		char const closeDelim = isAngle ? '>' : '"';
+		size_t const end = line.find(closeDelim, i + 1u);
+		if (end == std::string::npos) { return {}; }
+		name = line.substr(i + 1u, end - i - 1u);
+	} else if (isSlang) {
+		size_t const end = line.find_first_of(" \t;", i);
+		name = line.substr(i, end == std::string::npos ? end : end - i);
+		std::replace(name.begin(), name.end(), '.', '/');
+		std::replace(name.begin(), name.end(), '_', '-');
+	} else {
+		return {};
+	}
+	if (name.empty()) { return {}; }
+	if (isSlang && std::filesystem::path(name).extension().empty()) {
+		name += ".slang";
+	}
+	return { .name = name, .isAngle = isAngle };
+}
 
 static void collect_deps_impl(
 	std::string const & path,
@@ -4169,32 +4530,10 @@ static void collect_deps_impl(
 	);
 	std::string line;
 	while (std::getline(file, line)) {
-		size_t start = 0u;
-		while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) {
-			++start;
-		}
-		if (start >= line.size() || line[start] != '#') { continue; }
-		++start;
-		while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) {
-			++start;
-		}
-		if (line.compare(start, 7u, "include") != 0) { continue; }
-		start += 7u;
-		while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) {
-			++start;
-		}
-		if (start >= line.size()) { continue; }
-
-		char const openDelim = line[start];
-		bool const isQuoted = (openDelim == '"');
-		if (openDelim != '"' && openDelim != '<') { continue; }
-		char const closeDelim = isQuoted ? '"' : '>';
-		++start;
-		size_t const end = line.find(closeDelim, start);
-		if (end == std::string::npos) { continue; }
-
-		std::string const includeName = line.substr(start, end - start);
+		ShaderLineDependency const dependency = shader_line_dependency(line);
+		std::string const & includeName = dependency.name;
 		if (includeName.empty()) { continue; }
+		bool const isQuoted = !dependency.isAngle;
 
 		std::string resolvedPath;
 		if (isQuoted) {
@@ -4271,94 +4610,941 @@ static bool file_changed(
 	return file_write_time(path) != lastWriteTime;
 }
 
-static void pipeline_hot_reload()
-{
-	// -- check if compute or graphics pipeilne changed
-	bool anyChanged = false;
-	for (auto const & id : sDevice->pipelineGraphicsHandles) {
-		ImplPipelineGraphics const & impl = (
-			*sDevice->pipelineGraphicsPool.get(id)
-		);
-		if (file_changed(impl.pathFragment, impl.lastWriteTimeFragment)) {
-			anyChanged = true;
-			break;
-		}
-		if (file_changed(impl.pathMesh, impl.lastWriteTimeMesh)) {
-			anyChanged = true;
-			break;
-		}
-		if (any_dependency_changed(impl.dependencyPaths, impl.dependencyWriteTimes)) {
-			anyChanged = true;
-			break;
+static void shader_status_record(
+	ImplShaderStatus & status,
+	bool const ok,
+	std::string const & error = sLastCompileError
+) {
+	status.lastCompileTime = std::chrono::system_clock::now();
+	// a failure must never read as ok, even if the compiler printed nothing
+	status.lastError = (
+		ok ? std::string {}
+			: !error.empty() ? error
+			: std::string("compile failed (no compiler output)")
+	);
+	status.reloadPending = false;
+}
+
+struct ComputeBuildResult {
+	VkPipeline pipeline;
+	std::string error;
+};
+
+// MemAvailable in GiB; huge when unknown
+static f64 memory_available_gib() {
+	std::ifstream file("/proc/meminfo");
+	std::string line;
+	while (std::getline(file, line)) {
+		unsigned long long kib = 0ull;
+		if (sscanf(line.c_str(), "MemAvailable: %llu kB", &kib) == 1) {
+			return (f64)kib / (1024.0 * 1024.0);
 		}
 	}
-	if (!anyChanged) {
-		for (auto const & id : sDevice->pipelineComputeHandles) {
-			ImplPipelineCompute const & impl = (
-				*sDevice->pipelineComputePool.get(id)
+	return 1.0e9;
+}
+
+static constexpr f64 skCompileMemoryFloorGib = 4.0;
+static constexpr f64 skCompileMemoryWarnGib = 8.0;
+
+// builds every impl concurrently; slangc runs as separate processes. no new
+// compile starts below the memory floor until an earlier one finishes
+static std::vector<ComputeBuildResult> build_compute_pipelines_parallel(
+	std::vector<ImplPipelineCompute const *> const & impls
+) {
+	std::vector<std::future<ComputeBuildResult>> futures(impls.size());
+	size_t waited = 0u;
+	bool warned = false;
+	for (size_t i = 0u; i < impls.size(); ++i) {
+		f64 available = memory_available_gib();
+		if (available < skCompileMemoryWarnGib && !warned) {
+			printf(
+				"[warn] vkof: %.1f GiB memory available while compiling shaders\n",
+				available
 			);
-			if (file_changed(impl.pathCompute, impl.lastWriteTimeCompute)) {
-				anyChanged = true;
-				break;
-			}
-			if (
-				any_dependency_changed(
-					impl.dependencyPaths,
-					impl.dependencyWriteTimes
-				)
-			) {
-				anyChanged = true;
-				break;
-			}
+			warned = true;
 		}
+		while (available < skCompileMemoryFloorGib && waited < i) {
+			futures[waited].wait();
+			++waited;
+			available = memory_available_gib();
+		}
+		ImplPipelineCompute const * const impl = impls[i];
+		futures[i] = std::async(std::launch::async, [impl]() {
+			VkPipeline const pipeline = build_compute_pipeline(*impl);
+			return ComputeBuildResult {
+				.pipeline = pipeline,
+				.error = sLastCompileError,
+			};
+		});
+	}
+	std::vector<ComputeBuildResult> results;
+	results.reserve(impls.size());
+	for (std::future<ComputeBuildResult> & future : futures) {
+		results.emplace_back(future.get());
+	}
+	return results;
+}
+
+static bool graphics_pipeline_changed(ImplPipelineGraphics const & impl) {
+	return (
+		file_changed(impl.pathMesh, impl.lastWriteTimeMesh)
+		|| file_changed(impl.pathFragment, impl.lastWriteTimeFragment)
+		|| any_dependency_changed(impl.dependencyPaths, impl.dependencyWriteTimes)
+	);
+}
+
+static bool compute_pipeline_changed(ImplPipelineCompute const & impl) {
+	return (
+		file_changed(impl.pathCompute, impl.lastWriteTimeCompute)
+		|| any_dependency_changed(impl.dependencyPaths, impl.dependencyWriteTimes)
+	);
+}
+
+// -----------------------------------------------------------------------------
+// -- shader cache (shaderd artifacts)
+// -----------------------------------------------------------------------------
+
+namespace sc = vkof::shader_cache;
+
+namespace
+{
+	struct ShaderCacheState {
+		std::filesystem::path root {};
+		std::filesystem::path cache {};
+		bool enabled { false };
+		bool daemonAlive { false };
+		bool rescan { false };
+		u64 generation { 0 };
+		std::chrono::steady_clock::time_point lastPoll {};
+	};
+
+	struct CacheLoadResult {
+		VkPipeline pipeline;
+		std::string error;
+		bool fromBinary;
+	};
+
+	struct CachePendingLoad {
+		vkof::Pipeline handle;
+		std::string key;
+		u64 generation;
+		std::future<CacheLoadResult> future;
+	};
+
+	struct RetiredPipeline {
+		VkPipeline pipeline;
+		u64 frameIndex;
+	};
+
+	struct PipelineBinaryFile {
+		VkPipelineBinaryKeyKHR globalKey;
+		std::vector<VkPipelineBinaryKeyKHR> keys;
+		std::vector<std::string> datas;
+	};
+}
+
+static ShaderCacheState sShaderCache;
+static std::vector<CachePendingLoad> sCachePendingLoads;
+static std::vector<RetiredPipeline> sRetiredPipelines;
+
+static constexpr u32 skPipelineBinaryMagic = 0x42504b56u;
+static constexpr u32 skPipelineBinaryVersion = 1u;
+static constexpr i64 skShaderCachePollMs = 100;
+static constexpr u32 skBinaryKeyBytes = VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
+
+static VkPipelineBinaryKeyKHR binary_key_empty() {
+	return VkPipelineBinaryKeyKHR {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR,
+		.pNext = nullptr,
+		.keySize = 0u,
+		.key = {},
+	};
+}
+
+static bool binary_key_equal(
+	VkPipelineBinaryKeyKHR const & a,
+	VkPipelineBinaryKeyKHR const & b
+) {
+	return a.keySize == b.keySize && memcmp(a.key, b.key, a.keySize) == 0;
+}
+
+// identifies the device + driver a binary was built for. not
+// vkGetPipelineKeyKHR's global key: the validation layer crashes on its
+// null create info
+static std::optional<VkPipelineBinaryKeyKHR> binary_global_key() {
+	if (!sDevice->pfnCreatePipelineBinariesKHR) { return std::nullopt; }
+	VkPhysicalDeviceProperties properties;
+	vkGetPhysicalDeviceProperties(sDevice->device.physical_device, &properties);
+	VkPipelineBinaryKeyKHR key = binary_key_empty();
+	u32 const ids[] = {
+		properties.driverVersion,
+		properties.vendorID,
+		properties.deviceID,
+	};
+	static_assert(VK_UUID_SIZE + sizeof(ids) <= skBinaryKeyBytes);
+	memcpy(key.key, properties.pipelineCacheUUID, VK_UUID_SIZE);
+	memcpy(key.key + VK_UUID_SIZE, ids, sizeof(ids));
+	key.keySize = VK_UUID_SIZE + sizeof(ids);
+	return key;
+}
+
+static std::string binary_file_serialize(PipelineBinaryFile const & file) {
+	std::string out;
+	auto const fnAppend = [&](void const * const data, size_t const size) {
+		out.append((char const *)data, size);
+	};
+	auto const fnAppendKey = [&](VkPipelineBinaryKeyKHR const & key) {
+		fnAppend(&key.keySize, sizeof(u32));
+		fnAppend(key.key, skBinaryKeyBytes);
+	};
+	fnAppend(&skPipelineBinaryMagic, sizeof(u32));
+	fnAppend(&skPipelineBinaryVersion, sizeof(u32));
+	fnAppendKey(file.globalKey);
+	u32 const count = (u32)file.keys.size();
+	fnAppend(&count, sizeof(u32));
+	for (u32 i = 0u; i < count; ++i) {
+		fnAppendKey(file.keys[i]);
+		u64 const size = file.datas[i].size();
+		fnAppend(&size, sizeof(u64));
+		out += file.datas[i];
+	}
+	return out;
+}
+
+static std::optional<PipelineBinaryFile> binary_file_parse(
+	std::string_view const bytes
+) {
+	size_t offset = 0u;
+	auto const fnRead = [&](void * const dst, size_t const size) -> bool {
+		if (offset + size > bytes.size()) { return false; }
+		memcpy(dst, bytes.data() + offset, size);
+		offset += size;
+		return true;
+	};
+	auto const fnReadKey = [&](VkPipelineBinaryKeyKHR & key) -> bool {
+		key = binary_key_empty();
+		return (
+			fnRead(&key.keySize, sizeof(u32))
+			&& key.keySize <= skBinaryKeyBytes
+			&& fnRead(key.key, skBinaryKeyBytes)
+		);
+	};
+	u32 magic = 0u;
+	u32 version = 0u;
+	u32 count = 0u;
+	PipelineBinaryFile file {
+		.globalKey = binary_key_empty(),
+		.keys = {},
+		.datas = {},
+	};
+	bool const headerOk = (
+		fnRead(&magic, sizeof(u32))
+		&& fnRead(&version, sizeof(u32))
+		&& magic == skPipelineBinaryMagic
+		&& version == skPipelineBinaryVersion
+		&& fnReadKey(file.globalKey)
+		&& fnRead(&count, sizeof(u32))
+	);
+	if (!headerOk) { return std::nullopt; }
+	for (u32 i = 0u; i < count; ++i) {
+		VkPipelineBinaryKeyKHR key;
+		u64 size = 0ull;
+		if (!fnReadKey(key) || !fnRead(&size, sizeof(u64))) {
+			return std::nullopt;
+		}
+		if (offset + size > bytes.size()) { return std::nullopt; }
+		file.keys.emplace_back(key);
+		file.datas.emplace_back(bytes.substr(offset, size));
+		offset += size;
+	}
+	return file;
+}
+
+static std::optional<std::string> binary_capture(VkPipeline const pipeline) {
+	std::optional<VkPipelineBinaryKeyKHR> const globalKey = binary_global_key();
+	if (!globalKey) { return std::nullopt; }
+
+	// -- create binaries from the pipeline
+	VkPipelineBinaryCreateInfoKHR const createInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR,
+		.pNext = nullptr,
+		.pKeysAndDataInfo = nullptr,
+		.pipeline = pipeline,
+		.pPipelineCreateInfo = nullptr,
+	};
+	VkPipelineBinaryHandlesInfoKHR handlesInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR,
+		.pNext = nullptr,
+		.pipelineBinaryCount = 0u,
+		.pPipelineBinaries = nullptr,
+	};
+	VkResult result = sDevice->pfnCreatePipelineBinariesKHR(
+		sDevice->device, &createInfo, nullptr, &handlesInfo
+	);
+	if (result != VK_SUCCESS) { return std::nullopt; }
+	std::vector<VkPipelineBinaryKHR> binaries(handlesInfo.pipelineBinaryCount);
+	handlesInfo.pPipelineBinaries = binaries.data();
+	result = sDevice->pfnCreatePipelineBinariesKHR(
+		sDevice->device, &createInfo, nullptr, &handlesInfo
+	);
+	if (result != VK_SUCCESS) { return std::nullopt; }
+
+	// -- read back each binary's key and data
+	PipelineBinaryFile file {
+		.globalKey = *globalKey,
+		.keys = {},
+		.datas = {},
+	};
+	bool ok = true;
+	for (VkPipelineBinaryKHR const binary : binaries) {
+		VkPipelineBinaryDataInfoKHR const dataInfo = {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_DATA_INFO_KHR,
+			.pNext = nullptr,
+			.pipelineBinary = binary,
+		};
+		VkPipelineBinaryKeyKHR key = binary_key_empty();
+		size_t size = 0u;
+		ok = ok && (
+			sDevice->pfnGetPipelineBinaryDataKHR(
+				sDevice->device, &dataInfo, &key, &size, nullptr
+			) == VK_SUCCESS
+		);
+		std::string data(size, '\0');
+		ok = ok && (
+			sDevice->pfnGetPipelineBinaryDataKHR(
+				sDevice->device, &dataInfo, &key, &size, data.data()
+			) == VK_SUCCESS
+		);
+		file.keys.emplace_back(key);
+		file.datas.emplace_back(std::move(data));
+	}
+	for (VkPipelineBinaryKHR const binary : binaries) {
+		sDevice->pfnDestroyPipelineBinaryKHR(sDevice->device, binary, nullptr);
+	}
+	if (!ok) { return std::nullopt; }
+	return binary_file_serialize(file);
+}
+
+// VK_NULL_HANDLE when there is no usable binary for this device
+static VkPipeline compute_pipeline_from_binary(
+	std::string const & key,
+	VkShaderModule const module
+) {
+	if (!sDevice->pfnCreatePipelineBinariesKHR) { return VK_NULL_HANDLE; }
+	std::optional<std::string> const bytes = sc::file_read(
+		sc::artifact_path(sShaderCache.cache, key, ".pbin")
+	);
+	if (!bytes) { return VK_NULL_HANDLE; }
+	std::optional<PipelineBinaryFile> const file = binary_file_parse(*bytes);
+	std::optional<VkPipelineBinaryKeyKHR> const globalKey = binary_global_key();
+	if (
+		!file || !globalKey || file->keys.empty()
+		|| !binary_key_equal(file->globalKey, *globalKey)
+	) {
+		return VK_NULL_HANDLE;
 	}
 
-	if (!anyChanged) {
+	// -- recreate the binaries
+	std::vector<VkPipelineBinaryDataKHR> datas;
+	for (std::string const & data : file->datas) {
+		datas.emplace_back(VkPipelineBinaryDataKHR {
+			.dataSize = data.size(),
+			.pData = (void *)data.data(),
+		});
+	}
+	VkPipelineBinaryKeysAndDataKHR const keysAndData = {
+		.binaryCount = (u32)datas.size(),
+		.pPipelineBinaryKeys = file->keys.data(),
+		.pPipelineBinaryData = datas.data(),
+	};
+	VkPipelineBinaryCreateInfoKHR const createInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR,
+		.pNext = nullptr,
+		.pKeysAndDataInfo = &keysAndData,
+		.pipeline = VK_NULL_HANDLE,
+		.pPipelineCreateInfo = nullptr,
+	};
+	std::vector<VkPipelineBinaryKHR> binaries(datas.size());
+	VkPipelineBinaryHandlesInfoKHR handlesInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR,
+		.pNext = nullptr,
+		.pipelineBinaryCount = (u32)binaries.size(),
+		.pPipelineBinaries = binaries.data(),
+	};
+	VkResult const result = sDevice->pfnCreatePipelineBinariesKHR(
+		sDevice->device, &createInfo, nullptr, &handlesInfo
+	);
+	if (result != VK_SUCCESS) { return VK_NULL_HANDLE; }
+
+	// -- pipeline from the binaries
+	VkPipelineBinaryInfoKHR const binaryInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR,
+		.pNext = nullptr,
+		.binaryCount = (u32)binaries.size(),
+		.pPipelineBinaries = binaries.data(),
+	};
+	VkPipeline const pipeline = compute_pipeline_create_vk(module, &binaryInfo);
+	for (VkPipelineBinaryKHR const binary : binaries) {
+		sDevice->pfnDestroyPipelineBinaryKHR(sDevice->device, binary, nullptr);
+	}
+	return pipeline;
+}
+
+// thread-safe; prefers the pipeline binary, else compiles the spir-v
+static CacheLoadResult compute_pipeline_load_cached(std::string const & key) {
+	std::optional<std::string> const spirv = sc::file_read(
+		sc::artifact_path(sShaderCache.cache, key, ".spv")
+	);
+	if (!spirv) {
+		return CacheLoadResult {
+			.pipeline = VK_NULL_HANDLE,
+			.error = "shaderd artifact missing: " + key + ".spv",
+			.fromBinary = false,
+		};
+	}
+	VkShaderModule const module = shader_module_create(*spirv);
+	if (module == VK_NULL_HANDLE) {
+		return CacheLoadResult {
+			.pipeline = VK_NULL_HANDLE,
+			.error = "vkCreateShaderModule failed for " + key + ".spv",
+			.fromBinary = false,
+		};
+	}
+	VkPipeline pipeline = compute_pipeline_from_binary(key, module);
+	bool const fromBinary = pipeline != VK_NULL_HANDLE;
+	if (pipeline == VK_NULL_HANDLE) {
+		pipeline = compute_pipeline_create_vk(module, nullptr);
+	}
+	vkDestroyShaderModule(sDevice->device, module, nullptr);
+	return CacheLoadResult {
+		.pipeline = pipeline,
+		.error = (
+			pipeline == VK_NULL_HANDLE
+			? "vkCreateComputePipelines failed for " + key
+			: std::string {}
+		),
+		.fromBinary = fromBinary,
+	};
+}
+
+static std::optional<sc::Variant> shader_cache_variant(
+	ImplPipelineCompute const & impl
+) {
+	if (!sShaderCache.enabled || !shader_path_is_slang(impl.pathCompute)) {
+		return std::nullopt;
+	}
+	std::error_code ec;
+	std::filesystem::path const path = (
+		std::filesystem::weakly_canonical(impl.pathCompute, ec)
+	);
+	std::filesystem::path const relative = (
+		path.lexically_relative(sShaderCache.root)
+	);
+	if (ec || relative.empty() || *relative.begin() == "..") {
+		return std::nullopt;
+	}
+	return sc::Variant {
+		.entry = relative.generic_string(),
+		.defines = impl.defines,
+		.optimize = true,
+		.deferred = impl.cacheDeferred,
+	};
+}
+
+// sets the impl's cache key and asks shaderd to build it
+static void shader_cache_request(ImplPipelineCompute & impl) {
+	std::optional<sc::Variant> const variant = shader_cache_variant(impl);
+	if (!variant) {
+		impl.cacheKey.clear();
 		return;
 	}
+	impl.cacheKey = sc::key(*variant);
+	std::string const json = sc::manifest_serialize(*variant);
+	std::filesystem::path const path = (
+		sc::manifest_path(sShaderCache.cache, impl.cacheKey)
+	);
+	if (sc::file_read(path) != json) {
+		sc::file_write_atomic(path, json);
+	}
+}
 
-	// -- reload everything
-	vkDeviceWaitIdle(sDevice->device);
+static void pipeline_retire(VkPipeline const pipeline) {
+	if (pipeline == VK_NULL_HANDLE) { return; }
+	sRetiredPipelines.emplace_back(RetiredPipeline {
+		.pipeline = pipeline,
+		.frameIndex = sDevice->frameIndex,
+	});
+}
 
-	// for (auto & [id, impl] : sDevice->pipelineGraphicsPool) {
+static bool shader_cache_load_pending(vkof::Pipeline const handle) {
+	return std::any_of(
+		sCachePendingLoads.begin(),
+		sCachePendingLoads.end(),
+		[&](CachePendingLoad const & load) {
+			return load.handle.id == handle.id;
+		}
+	);
+}
+
+static void shader_cache_load_begin(
+	vkof::Pipeline const handle,
+	ImplPipelineCompute & impl,
+	u64 const generation
+) {
+	impl.status.reloadPending = true;
+	std::string const key = impl.cacheKey;
+	sCachePendingLoads.emplace_back(CachePendingLoad {
+		.handle = handle,
+		.key = key,
+		.generation = generation,
+		.future = std::async(std::launch::async, [key]() {
+			return compute_pipeline_load_cached(key);
+		}),
+	});
+}
+
+// resolves daemon-managed impls at creation from fresh artifacts, waiting on
+// a running shaderd for stale ones; resolved[i] false means compile in-process
+static void shader_cache_resolve(
+	std::vector<ImplPipelineCompute> & impls,
+	std::vector<std::string> & errors,
+	std::vector<bool> & resolved
+) {
+	struct Ready {
+		u32 index;
+		sc::Artifact artifact;
+	};
+	std::vector<Ready> ready;
+	std::vector<u32> waiting;
+
+	// -- fresh artifacts are ready, stale ones wait for shaderd
+	for (u32 i = 0u; i < impls.size(); ++i) {
+		ImplPipelineCompute & impl = impls[i];
+		if (impl.cacheKey.empty()) { continue; }
+		std::optional<sc::Artifact> const artifact = (
+			sc::artifact_read(sShaderCache.cache, impl.cacheKey)
+		);
+		if (artifact && sc::artifact_fresh(*artifact, sShaderCache.root)) {
+			ready.emplace_back(Ready { .index = i, .artifact = *artifact });
+			continue;
+		}
+		impl.cacheGeneration = artifact ? artifact->generation : 0ull;
+		waiting.emplace_back(i);
+	}
+
+	// -- wait on a running shaderd
+	if (!waiting.empty() && sc::daemon_alive(sShaderCache.cache)) {
+		printf(
+			"[vkof] waiting on shaderd for %zu pipeline(s)\n", waiting.size()
+		);
+		while (!waiting.empty() && sc::daemon_alive(sShaderCache.cache)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			std::erase_if(waiting, [&](u32 const i) {
+				std::optional<sc::Artifact> const artifact = (
+					sc::artifact_read(sShaderCache.cache, impls[i].cacheKey)
+				);
+				if (
+					!artifact
+					|| artifact->generation <= impls[i].cacheGeneration
+				) {
+					return false;
+				}
+				ready.emplace_back(Ready { .index = i, .artifact = *artifact });
+				return true;
+			});
+		}
+	}
+
+	// -- load ready artifacts in parallel
+	auto const loadStart = std::chrono::steady_clock::now();
+	std::vector<std::future<CacheLoadResult>> futures;
+	for (Ready const & r : ready) {
+		std::string const key = impls[r.index].cacheKey;
+		bool const ok = r.artifact.ok;
+		futures.emplace_back(std::async(std::launch::async, [key, ok]() {
+			return (
+				ok
+				? compute_pipeline_load_cached(key)
+				: CacheLoadResult {
+					.pipeline = VK_NULL_HANDLE,
+					.error = {},
+					.fromBinary = false,
+				}
+			);
+		}));
+	}
+	u32 binaryCount = 0u;
+	for (size_t i = 0u; i < ready.size(); ++i) {
+		Ready const & r = ready[i];
+		CacheLoadResult const result = futures[i].get();
+		binaryCount += result.fromBinary ? 1u : 0u;
+		ImplPipelineCompute & impl = impls[r.index];
+		impl.pipeline = result.pipeline;
+		impl.cacheGeneration = r.artifact.generation;
+		errors[r.index] = r.artifact.ok ? result.error : r.artifact.error;
+		// a vulkan failure on a good artifact falls back to in-process
+		resolved[r.index] = !r.artifact.ok || result.pipeline != VK_NULL_HANDLE;
+	}
+	if (!ready.empty()) {
+		printf(
+			"[vkof] %zu pipeline(s) from shaderd, %u from binaries, %.0f ms\n",
+			ready.size(),
+			binaryCount,
+			std::chrono::duration<f64, std::milli>(
+				std::chrono::steady_clock::now() - loadStart
+			).count()
+		);
+	}
+}
+
+// per frame: swaps in finished loads and starts loads for new artifacts
+static void shader_cache_update() {
+	// -- destroy pipelines no frame in flight still uses
+	std::erase_if(sRetiredPipelines, [](RetiredPipeline const & retired) {
+		if (sDevice->frameIndex < retired.frameIndex + kFramesInFlight + 1u) {
+			return false;
+		}
+		vkDestroyPipeline(sDevice->device, retired.pipeline, nullptr);
+		return true;
+	});
+
+	if (!sShaderCache.enabled) { return; }
+
+	// -- swap in finished loads
+	for (auto it = sCachePendingLoads.begin(); it != sCachePendingLoads.end();) {
+		if (
+			it->future.wait_for(std::chrono::seconds(0))
+			!= std::future_status::ready
+		) {
+			++it;
+			continue;
+		}
+		CacheLoadResult const result = it->future.get();
+		ImplPipelineCompute * const impl = (
+			sDevice->pipelineComputePool.get(it->handle)
+		);
+		if (!impl || impl->cacheKey != it->key) {
+			pipeline_retire(result.pipeline);
+		} else {
+			impl->cacheGeneration = it->generation;
+			shader_status_record(
+				impl->status, result.pipeline != VK_NULL_HANDLE, result.error
+			);
+			if (result.pipeline != VK_NULL_HANDLE) {
+				pipeline_retire(impl->pipeline);
+				impl->pipeline = result.pipeline;
+				sShaderReloaded = true;
+				printf(
+					"hot reloaded compute pipeline '%s' (shaderd)\n",
+					impl->pathCompute.c_str()
+				);
+			}
+		}
+		it = sCachePendingLoads.erase(it);
+		sShaderCache.rescan = true;
+	}
+
+	// -- poll shaderd
+	auto const now = std::chrono::steady_clock::now();
+	auto const pollPeriod = std::chrono::milliseconds(skShaderCachePollMs);
+	if (now - sShaderCache.lastPoll < pollPeriod) { return; }
+	sShaderCache.lastPoll = now;
+	sShaderCache.daemonAlive = sc::daemon_alive(sShaderCache.cache);
+	u64 const generation = sc::generation_read(sShaderCache.cache);
+	if (generation == sShaderCache.generation && !sShaderCache.rescan) {
+		return;
+	}
+	sShaderCache.generation = generation;
+	sShaderCache.rescan = false;
+
+	// -- load artifacts newer than what each pipeline has
+	for (auto const & handle : sDevice->pipelineComputeHandles) {
+		ImplPipelineCompute * const impl = (
+			sDevice->pipelineComputePool.get(handle)
+		);
+		if (
+			!impl || impl->cacheKey.empty() || shader_cache_load_pending(handle)
+		) {
+			continue;
+		}
+		std::optional<sc::Artifact> const artifact = (
+			sc::artifact_read(sShaderCache.cache, impl->cacheKey)
+		);
+		if (!artifact || artifact->generation <= impl->cacheGeneration) {
+			continue;
+		}
+		if (!artifact->ok) {
+			impl->cacheGeneration = artifact->generation;
+			shader_status_record(impl->status, false, artifact->error);
+			printf(
+				"shaderd: kept old compute pipeline '%s' (compile failed)\n",
+				impl->pathCompute.c_str()
+			);
+			continue;
+		}
+		shader_cache_load_begin(handle, *impl, artifact->generation);
+	}
+}
+
+static void shader_cache_shutdown() {
+	for (CachePendingLoad & load : sCachePendingLoads) {
+		CacheLoadResult const result = load.future.get();
+		if (result.pipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(sDevice->device, result.pipeline, nullptr);
+		}
+	}
+	sCachePendingLoads.clear();
+	for (RetiredPipeline const & retired : sRetiredPipelines) {
+		vkDestroyPipeline(sDevice->device, retired.pipeline, nullptr);
+	}
+	sRetiredPipelines.clear();
+}
+
+void vkof::shader_cache_configure(ShaderCacheConfigureInfo const & info) {
+	std::error_code ec;
+	sShaderCache.root = std::filesystem::weakly_canonical(info.sourceRoot, ec);
+	sShaderCache.cache = std::filesystem::weakly_canonical(info.cacheDir, ec);
+	sShaderCache.enabled = true;
+	sShaderCache.generation = sc::generation_read(sShaderCache.cache);
+	sShaderCache.daemonAlive = sc::daemon_alive(sShaderCache.cache);
+	std::filesystem::create_directories(
+		sc::manifest_dir(sShaderCache.cache), ec
+	);
+}
+
+static std::string statistic_value(
+	VkPipelineExecutableStatisticKHR const & statistic
+) {
+	switch (statistic.format) {
+		case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+			return statistic.value.b32 ? "true" : "false";
+		case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+			return std::to_string(statistic.value.i64);
+		case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+			return std::to_string(statistic.value.u64);
+		case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: {
+			char buffer[32];
+			snprintf(buffer, sizeof(buffer), "%g", statistic.value.f64);
+			return buffer;
+		}
+		default: return "?";
+	}
+}
+
+// statistics of every executable in the pipeline, if the driver reports any
+static std::vector<vkof::PipelineStatistic> pipeline_statistics(
+	VkPipeline const pipeline,
+	u32 & outSubgroupSize
+) {
+	std::vector<vkof::PipelineStatistic> result;
+	if (!sDevice->pfnGetPipelineExecutablePropertiesKHR) { return result; }
+	VkPipelineInfoKHR const pipelineInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR,
+		.pNext = nullptr,
+		.pipeline = pipeline,
+	};
+	u32 executableCount = 0u;
+	sDevice->pfnGetPipelineExecutablePropertiesKHR(
+		sDevice->device, &pipelineInfo, &executableCount, nullptr
+	);
+	VkPipelineExecutablePropertiesKHR const emptyProperties = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR,
+		.pNext = nullptr,
+		.stages = 0,
+		.name = {},
+		.description = {},
+		.subgroupSize = 0u,
+	};
+	std::vector<VkPipelineExecutablePropertiesKHR> executables(
+		executableCount, emptyProperties
+	);
+	sDevice->pfnGetPipelineExecutablePropertiesKHR(
+		sDevice->device, &pipelineInfo, &executableCount, executables.data()
+	);
+
+	VkPipelineExecutableStatisticKHR const emptyStatistic = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR,
+		.pNext = nullptr,
+		.name = {},
+		.description = {},
+		.format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR,
+		.value = {},
+	};
+	for (u32 i = 0u; i < executableCount; ++i) {
+		outSubgroupSize = executables[i].subgroupSize;
+		VkPipelineExecutableInfoKHR const executableInfo = {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+			.pNext = nullptr,
+			.pipeline = pipeline,
+			.executableIndex = i,
+		};
+		u32 statisticCount = 0u;
+		sDevice->pfnGetPipelineExecutableStatisticsKHR(
+			sDevice->device, &executableInfo, &statisticCount, nullptr
+		);
+		std::vector<VkPipelineExecutableStatisticKHR> statistics(
+			statisticCount, emptyStatistic
+		);
+		sDevice->pfnGetPipelineExecutableStatisticsKHR(
+			sDevice->device, &executableInfo, &statisticCount, statistics.data()
+		);
+		for (VkPipelineExecutableStatisticKHR const & statistic : statistics) {
+			result.emplace_back(vkof::PipelineStatistic {
+				.executable = executables[i].name,
+				.name = statistic.name,
+				.description = statistic.description,
+				.value = statistic_value(statistic),
+			});
+		}
+	}
+	return result;
+}
+
+vkof::DeviceShaderCoreInfo vkof::device_shader_core_info() {
+	VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smProperties = {
+		.sType = (
+			VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV
+		),
+		.pNext = nullptr,
+		.shaderSMCount = 0u,
+		.shaderWarpsPerSM = 0u,
+	};
+	bool const hasSmBuiltins = (
+		sDevice->physicalDevice.is_extension_present(
+			VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME
+		)
+	);
+	VkPhysicalDeviceProperties2 properties = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+		.pNext = hasSmBuiltins ? &smProperties : nullptr,
+		.properties = {},
+	};
+	vkGetPhysicalDeviceProperties2(
+		sDevice->device.physical_device, &properties
+	);
+	return DeviceShaderCoreInfo {
+		.smCount = smProperties.shaderSMCount,
+		.warpsPerSm = smProperties.shaderWarpsPerSM,
+		.maxSharedMemoryPerWorkgroup = (
+			properties.properties.limits.maxComputeSharedMemorySize
+		),
+	};
+}
+
+vkof::PipelineComputeBinaryBuildResult vkof::pipeline_compute_binary_build(
+	srat::slice<u8 const> const spirv,
+	bool const captureBinary
+) {
+	std::string_view const code((char const *)spirv.ptr(), spirv.size());
+	VkShaderModule const module = shader_module_create(code);
+	if (module == VK_NULL_HANDLE) {
+		return PipelineComputeBinaryBuildResult {
+			.ok = false,
+			.error = "vkCreateShaderModule failed",
+			.binary = {},
+			.subgroupSize = 0u,
+			.statistics = {},
+		};
+	}
+	bool const capture = (
+		captureBinary && sDevice->pfnCreatePipelineBinariesKHR != nullptr
+	);
+	bool const captureStatistics = (
+		sDevice->maintenance5
+		&& sDevice->pfnGetPipelineExecutablePropertiesKHR != nullptr
+	);
+	VkPipelineCreateFlags2CreateInfoKHR const flags2 = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+		.pNext = nullptr,
+		.flags = (
+			(capture ? VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR : 0ull)
+			| (
+				captureStatistics
+				? VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR
+				: 0ull
+			)
+		),
+	};
+	VkPipeline const pipeline = (
+		compute_pipeline_create_vk(
+			module, capture || captureStatistics ? &flags2 : nullptr
+		)
+	);
+	vkDestroyShaderModule(sDevice->device, module, nullptr);
+	if (pipeline == VK_NULL_HANDLE) {
+		return PipelineComputeBinaryBuildResult {
+			.ok = false,
+			.error = "vkCreateComputePipelines failed",
+			.binary = {},
+			.subgroupSize = 0u,
+			.statistics = {},
+		};
+	}
+	PipelineComputeBinaryBuildResult result {
+		.ok = true,
+		.error = {},
+		.binary = {},
+		.subgroupSize = 0u,
+		.statistics = {},
+	};
+	if (captureStatistics) {
+		result.statistics = pipeline_statistics(pipeline, result.subgroupSize);
+	}
+	if (capture) {
+		std::optional<std::string> const binary = binary_capture(pipeline);
+		if (binary) {
+			result.binary.assign(binary->begin(), binary->end());
+		} else {
+			result.error = "pipeline binary capture failed";
+		}
+	}
+	vkDestroyPipeline(sDevice->device, pipeline, nullptr);
+	return result;
+}
+
+static void pipeline_hot_reload()
+{
+	// -- compile pipelines flagged last frame. compiling blocks the whole
+	// frame, so flagging a frame early lets one presented frame show them
+	bool anyPending = false;
+	for (auto const & id : sDevice->pipelineGraphicsHandles) {
+		anyPending |= sDevice->pipelineGraphicsPool.get(id)->status.reloadPending;
+	}
+	for (auto const & id : sDevice->pipelineComputeHandles) {
+		ImplPipelineCompute const & impl = *sDevice->pipelineComputePool.get(id);
+		anyPending |= impl.cacheKey.empty() && impl.status.reloadPending;
+	}
+
+	if (anyPending) {
+		vkDeviceWaitIdle(sDevice->device);
+	}
+
 	for (auto const & id : sDevice->pipelineGraphicsHandles) {
 		ImplPipelineGraphics & impl = (
 			*sDevice->pipelineGraphicsPool.get(id)
 		);
-		bool const vtxChanged = (
-			file_changed(impl.pathMesh, impl.lastWriteTimeMesh)
-		);
-		bool const frgChanged = (
-			file_changed(impl.pathFragment, impl.lastWriteTimeFragment)
-		);
-		bool const depChanged = any_dependency_changed(
-			impl.dependencyPaths, impl.dependencyWriteTimes
-		);
-		if (!vtxChanged && !frgChanged && !depChanged) { continue; }
+		if (!impl.status.reloadPending) { continue; }
 
 		VkPipeline const rebuilt = build_graphics_pipeline(impl);
-		if (rebuilt == VK_NULL_HANDLE) {
-			// compile failed: keep the old pipeline, but advance the
-			// detection baseline so we don't retry (and stall + spam) every
-			// frame. a subsequent save (new mtime) re-triggers the reload.
-			printf(
-				"hot reload kept old pipeline '%s/%s' (compile failed)\n",
-				impl.pathMesh.c_str(), impl.pathFragment.c_str()
-			);
-			impl.lastWriteTimeMesh = file_write_time(impl.pathMesh);
-			impl.lastWriteTimeFragment = file_write_time(impl.pathFragment);
-			impl.dependencyWriteTimes = snapshot_write_times(impl.dependencyPaths);
-			continue;
-		}
-
-		VkPipeline const old = impl.pipeline;
-		impl.pipeline = rebuilt;
+		shader_status_record(impl.status, rebuilt != VK_NULL_HANDLE);
+		// on failure too, so a newly added import is watched before it compiles
 		impl.lastWriteTimeMesh = file_write_time(impl.pathMesh);
 		impl.lastWriteTimeFragment = file_write_time(impl.pathFragment);
 		impl.dependencyPaths = collect_shader_dependencies(
 			{impl.pathMesh, impl.pathFragment}, impl.includePaths
 		);
 		impl.dependencyWriteTimes = snapshot_write_times(impl.dependencyPaths);
+		if (rebuilt == VK_NULL_HANDLE) {
+			// keep the old pipeline; the next save re-triggers the reload
+			printf(
+				"hot reload kept old pipeline '%s/%s' (compile failed)\n",
+				impl.pathMesh.c_str(), impl.pathFragment.c_str()
+			);
+			continue;
+		}
+
+		VkPipeline const old = impl.pipeline;
+		impl.pipeline = rebuilt;
 		vkDestroyPipeline(sDevice->device, old, nullptr);
 		sShaderReloaded = true;
 		printf(
@@ -4367,43 +5553,65 @@ static void pipeline_hot_reload()
 		);
 	}
 
-	// -- compute
+	std::vector<ImplPipelineCompute *> pendingCompute;
 	for (auto const & id : sDevice->pipelineComputeHandles) {
-		ImplPipelineCompute & impl = (
-			*sDevice->pipelineComputePool.get(id)
-		);
-		bool const primaryChanged = file_changed(
-			impl.pathCompute, impl.lastWriteTimeCompute
-		);
-		bool const depChangedCompute = any_dependency_changed(
-			impl.dependencyPaths, impl.dependencyWriteTimes
-		);
-		if (!primaryChanged && !depChangedCompute) { continue; }
-
-		VkPipeline const rebuilt = build_compute_pipeline(impl);
-		if (rebuilt == VK_NULL_HANDLE) {
-			// see graphics path: advance the baseline on failure so we retry
-			// only on the next save, not every frame.
-			printf(
-				"hot reload kept old compute pipeline '%s' (compile failed)\n",
-				impl.pathCompute.c_str()
-			);
-			impl.lastWriteTimeCompute = file_write_time(impl.pathCompute);
-			impl.dependencyWriteTimes = snapshot_write_times(impl.dependencyPaths);
-			continue;
+		ImplPipelineCompute * const impl = sDevice->pipelineComputePool.get(id);
+		if (impl->cacheKey.empty() && impl->status.reloadPending) {
+			pendingCompute.emplace_back(impl);
 		}
-
-		VkPipeline const old = impl.pipeline;
-		impl.pipeline = rebuilt;
+	}
+	std::vector<ComputeBuildResult> const computeResults = (
+		build_compute_pipelines_parallel(
+			std::vector<ImplPipelineCompute const *>(
+				pendingCompute.begin(), pendingCompute.end()
+			)
+		)
+	);
+	for (size_t i = 0u; i < pendingCompute.size(); ++i) {
+		ImplPipelineCompute & impl = *pendingCompute[i];
+		VkPipeline const rebuilt = computeResults[i].pipeline;
+		shader_status_record(
+			impl.status, rebuilt != VK_NULL_HANDLE, computeResults[i].error
+		);
 		impl.lastWriteTimeCompute = file_write_time(impl.pathCompute);
 		impl.dependencyPaths = collect_shader_dependencies(
 			{impl.pathCompute}, impl.includePaths
 		);
 		impl.dependencyWriteTimes = snapshot_write_times(impl.dependencyPaths);
+		if (rebuilt == VK_NULL_HANDLE) {
+			printf(
+				"hot reload kept old compute pipeline '%s' (compile failed)\n",
+				impl.pathCompute.c_str()
+			);
+			continue;
+		}
+
+		VkPipeline const old = impl.pipeline;
+		impl.pipeline = rebuilt;
 		vkDestroyPipeline(sDevice->device, old, nullptr);
 		sShaderReloaded = true;
 		printf("hot reloaded compute pipeline '%s'\n", impl.pathCompute.c_str());
 	}
+
+	// -- flag changed pipelines; they compile at the end of the next frame
+	for (auto const & id : sDevice->pipelineGraphicsHandles) {
+		ImplPipelineGraphics & impl = (
+			*sDevice->pipelineGraphicsPool.get(id)
+		);
+		if (graphics_pipeline_changed(impl)) {
+			impl.status.reloadPending = true;
+		}
+	}
+	for (auto const & id : sDevice->pipelineComputeHandles) {
+		ImplPipelineCompute & impl = (
+			*sDevice->pipelineComputePool.get(id)
+		);
+		if (impl.cacheKey.empty() && compute_pipeline_changed(impl)) {
+			impl.status.reloadPending = true;
+		}
+	}
+
+	shader_cache_update();
 }
 
 // -----------------------------------------------------------------------------
@@ -4446,6 +5654,9 @@ vkof::Pipeline vkof::pipeline_graphics_create(
 		.dependencyWriteTimes = {},
 	};
 	implPipeline.pipeline = build_graphics_pipeline(implPipeline);
+	shader_status_record(
+		implPipeline.status, implPipeline.pipeline != VK_NULL_HANDLE
+	);
 	if (implPipeline.pipeline == VK_NULL_HANDLE) {
 		std::error_code ec;
 		bool const meshOk = (
@@ -4482,11 +5693,16 @@ vkof::Pipeline vkof::pipeline_graphics_create(
 	return handle;
 }
 
-vkof::Pipeline vkof::pipeline_compute_create(
+static ImplPipelineCompute compute_pipeline_impl(
 	vkof::PipelineComputeCreateInfo const & createInfo
 ) {
-	ImplPipelineCompute implPipeline;
+	ImplPipelineCompute implPipeline {};
 	implPipeline.pathCompute = createInfo.pathCompute;
+	implPipeline.debugName = (
+		createInfo.debugName
+			? std::string(createInfo.debugName)
+			: std::filesystem::path(createInfo.pathCompute).stem().string()
+	);
 	implPipeline.defines = std::vector<std::string>(
 		createInfo.defines.ptr(),
 		createInfo.defines.ptr() + createInfo.defines.size()
@@ -4496,7 +5712,70 @@ vkof::Pipeline vkof::pipeline_compute_create(
 		createInfo.includePaths.ptr() + createInfo.includePaths.size()
 	);
 	implPipeline.layout = sDevice->pipelineLayoutUniversal;
-	implPipeline.pipeline = build_compute_pipeline(implPipeline);
+	implPipeline.cacheDeferred = createInfo.deferred;
+	shader_cache_request(implPipeline);
+	return implPipeline;
+}
+
+static vkof::Pipeline compute_pipeline_register(
+	ImplPipelineCompute & implPipeline,
+	vkof::PipelineComputeCreateInfo const & createInfo,
+	std::string const & error
+);
+
+vkof::Pipeline vkof::pipeline_compute_create(
+	vkof::PipelineComputeCreateInfo const & createInfo
+) {
+	vkof::Pipeline pipeline { .id = 0 };
+	pipeline_compute_create_batch(
+		srat::slice { &createInfo, 1u }, srat::slice { &pipeline, 1u }
+	);
+	return pipeline;
+}
+
+void vkof::pipeline_compute_create_batch(
+	srat::slice<PipelineComputeCreateInfo const> const createInfos,
+	srat::slice<Pipeline> const outPipelines
+) {
+	std::vector<ImplPipelineCompute> impls;
+	impls.reserve(createInfos.size());
+	for (u32 i = 0u; i < createInfos.size(); ++i) {
+		impls.emplace_back(compute_pipeline_impl(createInfos[i]));
+	}
+	std::vector<std::string> errors(impls.size());
+	std::vector<bool> resolved(impls.size(), false);
+	shader_cache_resolve(impls, errors, resolved);
+
+	// -- compile the rest in-process
+	std::vector<ImplPipelineCompute const *> implPtrs;
+	std::vector<u32> indices;
+	for (u32 i = 0u; i < impls.size(); ++i) {
+		if (resolved[i]) { continue; }
+		implPtrs.emplace_back(&impls[i]);
+		indices.emplace_back(i);
+	}
+	std::vector<ComputeBuildResult> const results = (
+		build_compute_pipelines_parallel(implPtrs)
+	);
+	for (size_t i = 0u; i < indices.size(); ++i) {
+		impls[indices[i]].pipeline = results[i].pipeline;
+		errors[indices[i]] = results[i].error;
+	}
+	for (u32 i = 0u; i < createInfos.size(); ++i) {
+		outPipelines[i] = (
+			compute_pipeline_register(impls[i], createInfos[i], errors[i])
+		);
+	}
+}
+
+static vkof::Pipeline compute_pipeline_register(
+	ImplPipelineCompute & implPipeline,
+	vkof::PipelineComputeCreateInfo const & createInfo,
+	std::string const & error
+) {
+	shader_status_record(
+		implPipeline.status, implPipeline.pipeline != VK_NULL_HANDLE, error
+	);
 	if (implPipeline.pipeline == VK_NULL_HANDLE) {
 		std::error_code ec;
 		if (!std::filesystem::exists(implPipeline.pathCompute, ec) || ec) {
@@ -4545,7 +5824,12 @@ void vkof::pipeline_destroy(Pipeline const & pipeline)
 	}
 	// then compute pool
 	if (auto const impl = sDevice->pipelineComputePool.get(pipeline)) {
-		vkDestroyPipeline(sDevice->device, impl->pipeline, nullptr);
+		std::erase_if(sCachePendingLoads, [&](CachePendingLoad & load) {
+			if (load.handle.id != pipeline.id) { return false; }
+			pipeline_retire(load.future.get().pipeline);
+			return true;
+		});
+		pipeline_retire(impl->pipeline);
 		sDevice->pipelineComputePool.free(pipeline);
 		auto & v = sDevice->pipelineComputeHandles;
 		v.erase(
@@ -4615,20 +5899,22 @@ void vkof::cmd_draw(CmdDraw const & draw)
 	);
 }
 
-void vkof::cmd_dispatch(CmdDispatch const & dispatch)
-{
-	auto const implCmd = sDevice->commandBufferPool.get(dispatch.cmd);
-	auto const implPipeline = (
-		sDevice->pipelineComputePool.get(dispatch.pipeline)
-	);
+// binds a compute pipeline and its push constants; null if nothing to run
+static ImplCommandBuffer * compute_bind(
+	vkof::CommandBuffer const & cmd,
+	vkof::Pipeline const & pipeline,
+	srat::slice<u8 const> const pushconstant
+) {
+	auto const implCmd = sDevice->commandBufferPool.get(cmd);
+	auto const implPipeline = sDevice->pipelineComputePool.get(pipeline);
 	if (!implCmd || !implPipeline) {
 		printf("[vkof] cmd_dispatch: invalid command buffer or pipeline\n");
-		return;
+		return nullptr;
 	}
-	if (implPipeline->pipeline == VK_NULL_HANDLE) { return; }
+	if (implPipeline->pipeline == VK_NULL_HANDLE) { return nullptr; }
 
 	if (
-		   implCmd->boundPipeline.id != dispatch.pipeline.id
+		   implCmd->boundPipeline.id != pipeline.id
 		|| implCmd->bindPoint != VK_PIPELINE_BIND_POINT_COMPUTE
 	) {
 		vkCmdBindPipeline(
@@ -4643,20 +5929,157 @@ void vkof::cmd_dispatch(CmdDispatch const & dispatch)
 			0u, 1u, &sBindlessSet,
 			0u, nullptr
 		);
-		implCmd->boundPipeline = dispatch.pipeline;
+		implCmd->boundPipeline = pipeline;
 		implCmd->bindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
 	}
 
-	if (dispatch.pushconstant.size() > 0) {
+	if (pushconstant.size() > 0) {
 		vkCmdPushConstants(
 			implCmd->cmd,
 			sDevice->pipelineLayoutUniversal,
 			VK_SHADER_STAGE_ALL,
 			/*offset=*/ 128,
-			(u32)dispatch.pushconstant.size(),
-			dispatch.pushconstant.ptr()
+			(u32)pushconstant.size(),
+			pushconstant.ptr()
 		);
 	}
+	return implCmd;
+}
+
+static void profiler_count_dispatch(vkof::Pipeline const pipeline) {
+	Profiler & prof = sDevice->profiler;
+	if (prof.recordingNode >= kMaxProfiledNodes) { return; }
+	std::vector<ProfilerDispatchCount> & counts = (
+		prof.nodeDispatches[prof.recordingNode]
+	);
+	for (ProfilerDispatchCount & entry : counts) {
+		if (entry.pipeline.id == pipeline.id) {
+			++entry.count;
+			return;
+		}
+	}
+	counts.emplace_back(ProfilerDispatchCount { pipeline, 1u });
+}
+
+static constexpr double skProfilerWindowMs = 250.0;
+
+static void profiler_row_add(
+	std::vector<ProfilerRow> & rows,
+	std::string const & section,
+	std::string const & label,
+	double const value
+) {
+	for (ProfilerRow & row : rows) {
+		if (row.section == section && row.label == label) {
+			row.value += value;
+			return;
+		}
+	}
+	rows.emplace_back(ProfilerRow { section, label, value });
+}
+
+// adds this frame to the averaging window, and publishes the window's
+// averages once it spans skProfilerWindowMs
+static void profiler_window_update(Profiler & prof) {
+	auto const now = std::chrono::steady_clock::now();
+	if (prof.windowFrames == 0u) {
+		prof.windowStart = now;
+	}
+
+	// -- nodes, by name, numbered when a name repeats
+	u32 const nodeCount = std::min(prof.frameNodeCount, kMaxProfiledNodes);
+	double cpuTotal = 0.0;
+	double gpuTotal = 0.0;
+	for (u32 i = 0u; i < nodeCount; ++i) {
+		std::string section = (
+			prof.nodeNames[i].empty()
+				? "node " + std::to_string(i)
+				: prof.nodeNames[i]
+		);
+		u32 repeats = 0u;
+		for (u32 j = 0u; j < i; ++j) {
+			repeats += prof.nodeNames[j] == prof.nodeNames[i] ? 1u : 0u;
+		}
+		if (repeats > 0u && !prof.nodeNames[i].empty()) {
+			section += " #" + std::to_string(repeats);
+		}
+		NodeTiming const & timing = prof.timings[i];
+		cpuTotal += timing.cpuMs;
+		gpuTotal += timing.gpuMs;
+		profiler_row_add(prof.windowSums, section, "cpu ms", timing.cpuMs);
+		profiler_row_add(prof.windowSums, section, "gpu ms", timing.gpuMs);
+		for (ProfilerDispatchCount const & entry : prof.nodeDispatches[i]) {
+			auto const implPipeline = (
+				sDevice->pipelineComputePool.get(entry.pipeline)
+			);
+			std::string const label = (
+				implPipeline ? implPipeline->debugName : "pipeline"
+			);
+			profiler_row_add(
+				prof.windowSums, section, label, (double)entry.count
+			);
+		}
+	}
+	profiler_row_add(prof.windowSums, "frame", "cpu ms", cpuTotal);
+	profiler_row_add(prof.windowSums, "frame", "gpu ms", gpuTotal);
+
+	// -- application values
+	for (ProfilerRow const & row : prof.values) {
+		profiler_row_add(prof.windowSums, "values", row.label, row.value);
+	}
+	prof.values.clear();
+
+	// -- publish
+	++prof.windowFrames;
+	double const elapsedMs = (
+		std::chrono::duration<double, std::milli>(now - prof.windowStart).count()
+	);
+	if (elapsedMs < skProfilerWindowMs) {
+		return;
+	}
+	prof.display = std::move(prof.windowSums);
+	for (ProfilerRow & row : prof.display) {
+		row.value /= (double)prof.windowFrames;
+	}
+	// the frame totals read best first
+	std::stable_partition(
+		prof.display.begin(),
+		prof.display.end(),
+		[](ProfilerRow const & row) { return row.section == "frame"; }
+	);
+	prof.windowSums = {};
+	prof.windowFrames = 0u;
+}
+
+static void profiler_window_draw(Profiler const & prof) {
+	ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
+	ImGui::Begin("profiler", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+	ImGui::TextUnformatted("per frame, averaged over 250 ms");
+	std::string const * section = nullptr;
+	for (ProfilerRow const & row : prof.display) {
+		if (section == nullptr || *section != row.section) {
+			section = &row.section;
+			ImGui::Separator();
+			ImGui::TextUnformatted(row.section.c_str());
+		}
+		ImGui::Text("  %-28s %9.3f", row.label.c_str(), row.value);
+	}
+	ImGui::End();
+}
+
+void vkof::profiler_value(char const * const name, double const value) {
+	// -- only the window reads values
+	if (sDevice->window == nullptr) { return; }
+	sDevice->profiler.values.emplace_back(ProfilerRow { "", name, value });
+}
+
+void vkof::cmd_dispatch(CmdDispatch const & dispatch)
+{
+	ImplCommandBuffer * const implCmd = (
+		compute_bind(dispatch.cmd, dispatch.pipeline, dispatch.pushconstant)
+	);
+	if (!implCmd) { return; }
+	profiler_count_dispatch(dispatch.pipeline);
 
 	u32 const gx = (
 		(dispatch.invocationCount.x + dispatch.threadgroupSize.x - 1u)
@@ -4671,6 +6094,82 @@ void vkof::cmd_dispatch(CmdDispatch const & dispatch)
 		/ dispatch.threadgroupSize.z
 	);
 	vkCmdDispatch(implCmd->cmd, gx, gy, gz);
+}
+
+void vkof::cmd_dispatch_indirect(CmdDispatchIndirect const & dispatch)
+{
+	auto const implBuffer = sDevice->bufferPool.get(dispatch.argumentBuffer);
+	if (!implBuffer) {
+		printf("[vkof] cmd_dispatch_indirect: invalid argument buffer\n");
+		return;
+	}
+	ImplCommandBuffer * const implCmd = (
+		compute_bind(dispatch.cmd, dispatch.pipeline, dispatch.pushconstant)
+	);
+	if (!implCmd) { return; }
+	profiler_count_dispatch(dispatch.pipeline);
+	vkCmdDispatchIndirect(
+		implCmd->cmd, implBuffer->buffer, dispatch.argumentByteOffset
+	);
+}
+
+void vkof::cmd_fill_buffer(CmdFillBuffer const & fill)
+{
+	auto const implCmd = sDevice->commandBufferPool.get(fill.cmd);
+	auto const implBuffer = sDevice->bufferPool.get(fill.buffer);
+	if (!implCmd || !implBuffer) {
+		printf("[vkof] cmd_fill_buffer: invalid command buffer or buffer\n");
+		return;
+	}
+	vkCmdFillBuffer(
+		implCmd->cmd,
+		implBuffer->buffer,
+		fill.byteOffset,
+		fill.byteCount,
+		fill.value
+	);
+}
+
+void vkof::cmd_barrier_compute(CommandBuffer const & cmd)
+{
+	auto const implCmd = sDevice->commandBufferPool.get(cmd);
+	if (!implCmd) { return; }
+	VkMemoryBarrier2 const barrier = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+		.pNext = nullptr,
+		.srcStageMask = (
+			VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+			| VK_PIPELINE_STAGE_2_CLEAR_BIT
+			| VK_PIPELINE_STAGE_2_COPY_BIT
+		),
+		.srcAccessMask = (
+			VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT
+		),
+		.dstStageMask = (
+			VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+			| VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+			| VK_PIPELINE_STAGE_2_CLEAR_BIT
+			| VK_PIPELINE_STAGE_2_COPY_BIT
+		),
+		.dstAccessMask = (
+			VK_ACCESS_2_SHADER_READ_BIT
+			| VK_ACCESS_2_SHADER_WRITE_BIT
+			| VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+			| VK_ACCESS_2_TRANSFER_WRITE_BIT
+		),
+	};
+	VkDependencyInfo const dependency = {
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.pNext = nullptr,
+		.dependencyFlags = 0,
+		.memoryBarrierCount = 1u,
+		.pMemoryBarriers = &barrier,
+		.bufferMemoryBarrierCount = 0u,
+		.pBufferMemoryBarriers = nullptr,
+		.imageMemoryBarrierCount = 0u,
+		.pImageMemoryBarriers = nullptr,
+	};
+	vkCmdPipelineBarrier2(implCmd->cmd, &dependency);
 }
 
 static bool resolve_image(
@@ -4981,6 +6480,153 @@ static void swapchain_recreate() {
 	}
 }
 
+// -- per-pipeline compile state, most recently compiled first
+static void shader_compiler_window_draw() {
+	struct Row {
+		std::string name;
+		ImplShaderStatus const * status;
+	};
+	std::vector<Row> rows;
+	auto const fnFileName = [](std::string const & path) -> std::string {
+		return std::filesystem::path(path).filename().string();
+	};
+	for (auto const & id : sDevice->pipelineGraphicsHandles) {
+		ImplPipelineGraphics const * const impl = (
+			sDevice->pipelineGraphicsPool.get(id)
+		);
+		if (!impl) { continue; }
+		rows.emplace_back(Row {
+			.name = (
+				fnFileName(impl->pathMesh) + " | " + fnFileName(impl->pathFragment)
+			),
+			.status = &impl->status,
+		});
+	}
+	for (auto const & id : sDevice->pipelineComputeHandles) {
+		ImplPipelineCompute const * const impl = (
+			sDevice->pipelineComputePool.get(id)
+		);
+		if (!impl) { continue; }
+		rows.emplace_back(Row {
+			.name = fnFileName(impl->pathCompute),
+			.status = &impl->status,
+		});
+	}
+	std::sort(rows.begin(), rows.end(), [](Row const & a, Row const & b) {
+		return a.status->lastCompileTime > b.status->lastCompileTime;
+	});
+
+	bool const anyFailed = std::any_of(rows.begin(), rows.end(), [](Row const & r) {
+		return !r.status->lastError.empty();
+	});
+	ImGui::SetNextWindowPos(ImVec2(10.0f, 400.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(620.0f, 260.0f), ImGuiCond_FirstUseEver);
+	// -- collapse when everything compiles, expand on a failure
+	// only on a change, so the window can still be opened or closed by hand
+	static bool sFailedLastFrame = true;
+	if (anyFailed != sFailedLastFrame) {
+		ImGui::SetNextWindowCollapsed(!anyFailed, ImGuiCond_Always);
+		sFailedLastFrame = anyFailed;
+	}
+	if (anyFailed) {
+		ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.5f, 0.05f, 0.05f, 1.0f));
+		ImGui::PushStyleColor(
+			ImGuiCol_TitleBgActive, ImVec4(0.7f, 0.05f, 0.05f, 1.0f)
+		);
+		ImGui::PushStyleColor(
+			ImGuiCol_TitleBgCollapsed, ImVec4(0.5f, 0.05f, 0.05f, 1.0f)
+		);
+	}
+	bool const open = ImGui::Begin("shader compiler", nullptr, 0);
+	if (anyFailed) {
+		ImGui::PopStyleColor(3);
+	}
+	if (!open) {
+		ImGui::End();
+		return;
+	}
+
+	ImVec4 const colorOk = ImVec4(0.4f, 0.9f, 0.4f, 1.0f);
+	ImVec4 const colorFailed = ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
+	ImVec4 const colorPending = ImVec4(1.0f, 0.85f, 0.3f, 1.0f);
+	if (sShaderCache.enabled) {
+		if (sShaderCache.daemonAlive) {
+			ImGui::TextColored(
+				colorOk,
+				"shaderd running (generation %llu)",
+				(unsigned long long)sShaderCache.generation
+			);
+		} else {
+			ImGui::TextColored(
+				colorPending, "shaderd not running: no hot reload for"
+			);
+			ImGui::TextUnformatted(sShaderCache.root.string().c_str());
+		}
+	}
+	char const spinner[] = { '|', '/', '-', '\\' };
+	ImGuiTableFlags const tableFlags = (
+		ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
+	);
+	if (ImGui::BeginTable("shaders", 3, tableFlags)) {
+		for (Row const & row : rows) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			if (row.status->reloadPending) {
+				u32 const frame = (u32)(ImGui::GetTime() * 8.0) % 4u;
+				ImGui::TextColored(colorPending, "%c compiling", spinner[frame]);
+			} else if (!row.status->lastError.empty()) {
+				ImGui::TextColored(colorFailed, "x failed");
+			} else {
+				ImGui::TextColored(colorOk, "ok");
+			}
+			ImGui::TableNextColumn();
+			std::time_t const t = (
+				std::chrono::system_clock::to_time_t(row.status->lastCompileTime)
+			);
+			std::tm local {};
+			localtime_r(&t, &local);
+			ImGui::Text("%02d:%02d", local.tm_hour, local.tm_min);
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(row.name.c_str());
+		}
+		ImGui::EndTable();
+	}
+
+	for (Row const & row : rows) {
+		if (row.status->lastError.empty()) { continue; }
+		if (ImGui::CollapsingHeader(row.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+			// -- one line at a time, with error lines highlighted
+			ImU32 const colorHighlight = IM_COL32(150, 20, 20, 255);
+			ImVec4 const colorErrorText = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+			std::string const & error = row.status->lastError;
+			size_t begin = 0u;
+			while (begin < error.size()) {
+				size_t end = error.find('\n', begin);
+				if (end == std::string::npos) { end = error.size(); }
+				std::string const line = error.substr(begin, end - begin);
+				begin = end + 1u;
+				bool const isError = line.find("error[E") != std::string::npos;
+				if (isError) {
+					ImVec2 const lineMin = ImGui::GetCursorScreenPos();
+					ImVec2 const lineMax = ImVec2(
+						lineMin.x + ImGui::GetContentRegionAvail().x,
+						lineMin.y + ImGui::GetTextLineHeight()
+					);
+					ImGui::GetWindowDrawList()->AddRectFilled(
+						lineMin, lineMax, colorHighlight
+					);
+				}
+				ImGui::TextColored(
+					isError ? colorErrorText : colorFailed,
+					"%s",
+					line.c_str()
+				);
+			}
+		}
+	}
+	ImGui::End();
+}
+
 void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 {
 	sShaderReloaded = false;
@@ -5097,6 +6743,12 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 		);
 	}
 
+#if defined(PONDER_DLSS)
+	sRootPushconstant.assign(
+		exec.rootPushconstant.ptr(),
+		exec.rootPushconstant.ptr() + exec.rootPushconstant.size()
+	);
+#endif
 	// -- root push constants go in the [0, 128) window
 	if (exec.rootPushconstant.size() > 0) {
 		vkCmdPushConstants(
@@ -5248,6 +6900,10 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 
 		u32 const nodeIdx = prof.frameNodeCount++;
 		bool const canProfile = prof.gpuSupported && nodeIdx < kMaxProfiledNodes;
+		if (nodeIdx < kMaxProfiledNodes) {
+			prof.nodeNames[nodeIdx] = node->debugName;
+			prof.nodeDispatches[nodeIdx].clear();
+		}
 		auto const cpuT0 = std::chrono::steady_clock::now();
 
 		if (canProfile) {
@@ -5446,7 +7102,9 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 		}
 #endif
 		if (node->callback) {
+			prof.recordingNode = nodeIdx;
 			node->callback(cmdHandle);
+			prof.recordingNode = ~0u;
 		}
 
 		if (hasColor || hasDepth) {
@@ -5792,17 +7450,8 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 		vkCmdPipelineBarrier2(cmd, &nodeBoundaryDep);
 
 		// -- profiler window
-		if (prof.displayCount > 0) {
-			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-			ImGui::Begin("profiler", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-			ImGui::Text("%-6s  %8s  %8s", "node", "cpu ms", "gpu ms");
-			ImGui::Separator();
-			for (u32 i = 0; i < prof.displayCount; ++i) {
-				NodeTiming const & t = prof.timings[i];
-				ImGui::Text("node %-2u  %8.3f  %8.3f", i, t.cpuMs, t.gpuMs);
-			}
-			ImGui::End();
-		}
+		profiler_window_update(prof);
+		profiler_window_draw(prof);
 
 		// -- vma memory dashboard
 		{
@@ -5838,21 +7487,7 @@ void vkof::render_graph_execute(RenderGraphExecuteInfo const & exec)
 			ImGui::End();
 		}
 
-		// -- shader error overlay
-		if (!sLastCompileError.empty()) {
-			ImGui::SetNextWindowPos(ImVec2(10.0f, 400.0f), ImGuiCond_FirstUseEver);
-			ImGui::SetNextWindowSize(ImVec2(620.0f, 260.0f), ImGuiCond_FirstUseEver);
-			ImGui::PushStyleColor(
-				ImGuiCol_TitleBg, ImVec4(0.5f, 0.05f, 0.05f, 1.0f)
-			);
-			ImGui::PushStyleColor(
-				ImGuiCol_TitleBgActive, ImVec4(0.7f, 0.05f, 0.05f, 1.0f)
-			);
-			ImGui::Begin("shader error", nullptr, 0);
-			ImGui::PopStyleColor(2);
-			ImGui::TextUnformatted(sLastCompileError.c_str());
-			ImGui::End();
-		}
+		shader_compiler_window_draw();
 
 		ImGui::Render();
 		ImDrawData * const imguiDrawData = ImGui::GetDrawData();
@@ -6799,3 +8434,59 @@ void vkof::acceleration_structure_set_tlas(
 	};
 	vkUpdateDescriptorSets(sDevice->device, 1u, &write, 0u, nullptr);
 }
+
+// -----------------------------------------------------------------------------
+// -- ngx internals
+// -----------------------------------------------------------------------------
+
+#if defined(PONDER_DLSS)
+
+VkInstance vkof::internal::native_instance() {
+	return sDevice->instance.instance;
+}
+
+VkPhysicalDevice vkof::internal::native_physical_device() {
+	return sDevice->physicalDevice.physical_device;
+}
+
+VkDevice vkof::internal::native_device() {
+	return sDevice->device.device;
+}
+
+VkCommandBuffer vkof::internal::native_command_buffer(
+	CommandBuffer const & cmd
+) {
+	ImplCommandBuffer const * const implCmd = sDevice->commandBufferPool.get(cmd);
+	return implCmd ? implCmd->cmd : VK_NULL_HANDLE;
+}
+
+bool vkof::internal::native_image(Image const & image, NativeImage & out) {
+	auto const implTexture = sDevice->imagePool.get(image);
+	if (!implTexture) { return false; }
+	out = NativeImage {
+		.image = implTexture->image,
+		.view = implTexture->imageViewFull,
+		.format = implTexture->vkFormat,
+		.width = implTexture->width,
+		.height = implTexture->height,
+	};
+	return true;
+}
+
+void vkof::internal::command_buffer_state_invalidate(CommandBuffer const & cmd) {
+	ImplCommandBuffer * const implCmd = sDevice->commandBufferPool.get(cmd);
+	if (!implCmd) { return; }
+	implCmd->boundPipeline = { .id = 0 };
+	if (!sRootPushconstant.empty()) {
+		vkCmdPushConstants(
+			implCmd->cmd,
+			sDevice->pipelineLayoutUniversal,
+			VK_SHADER_STAGE_ALL,
+			/*offset=*/ 0,
+			(u32)sRootPushconstant.size(),
+			sRootPushconstant.data()
+		);
+	}
+}
+
+#endif

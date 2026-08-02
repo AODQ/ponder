@@ -49,7 +49,7 @@ std::vector<f32> integrate_metal_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "metallic_lobe_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/metallic_lobe_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -94,7 +94,7 @@ std::vector<f32v3> evaluate_conductor_ibl_albedo(std::vector<f32> const & sample
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "conductor_ibl_albedo_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/conductor_ibl_albedo_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -168,7 +168,7 @@ std::vector<f32v3> integrate_thinfilm_metal_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thinfilm_metallic_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thinfilm_metallic_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -215,7 +215,7 @@ std::vector<f32v3> evaluate_conductor_ibl_albedo_thinfilm(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "conductor_ibl_albedo_thinfilm_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/conductor_ibl_albedo_thinfilm_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -283,7 +283,7 @@ std::vector<f32> integrate_coat_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "coat_ibl_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/coat_ibl_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -328,7 +328,7 @@ std::vector<f32v3> evaluate_coat_ibl(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "coat_ibl_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/coat_ibl_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -408,7 +408,7 @@ std::vector<f32v3> evaluate_full_stack(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "openpbr_ibl_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/openpbr_ibl_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

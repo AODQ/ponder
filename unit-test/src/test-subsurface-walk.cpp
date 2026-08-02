@@ -82,7 +82,7 @@ WalkResult run_subsurface_walk_step(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_walk_step.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_walk_step.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -55,6 +55,10 @@ void ponder::camera_controller_install_scroll_callback(
 	glfwSetScrollCallback(window, scroll_callback);
 }
 
+void ponder::camera_controller_scroll_discard() {
+	sScrollDelta = 0.0f;
+}
+
 bool ponder::camera_controller_update(
 	CameraController & c,
 	GLFWwindow * const window,
@@ -87,6 +91,16 @@ bool ponder::camera_controller_update(
 		}
 	}
 	c.tabWasDown = tabDown;
+
+	bool const rDown = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+	if (keysFree && rDown && !c.rWasDown) {
+		c.flyMode = (
+			c.flyMode == CameraFlyMode::Drone
+			? CameraFlyMode::Free
+			: CameraFlyMode::Drone
+		);
+	}
+	c.rWasDown = rDown;
 
 	if (
 		mouseFree
@@ -121,7 +135,23 @@ bool ponder::camera_controller_update(
 		if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) { move.y -= 1.0f; }
 		if (move.x != 0.0f || move.y != 0.0f || move.z != 0.0f) {
 			f32 const speed = boundsExtent * c.flySpeedMultiplier * deltaTime;
-			srat::camera_fp_move(c.firstPerson, move * speed);
+			switch (c.flyMode) {
+				case CameraFlyMode::Drone: {
+					// forward flattened onto the ground; right is already level
+					f32v3 const forward = {
+						sinf(c.firstPerson.yaw), 0.0f, -cosf(c.firstPerson.yaw)
+					};
+					f32v3 const right = srat::camera_fp_right(c.firstPerson);
+					f32v3 const up = { 0.0f, 1.0f, 0.0f };
+					c.firstPerson.position = (
+						c.firstPerson.position
+						+ (right * move.x + up * move.y + forward * move.z) * speed
+					);
+				} break;
+				case CameraFlyMode::Free: {
+					srat::camera_fp_move(c.firstPerson, move * speed);
+				} break;
+			}
 			cameraMoved = true;
 		}
 	}

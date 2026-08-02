@@ -9,6 +9,8 @@
 
 #include <functional>
 #include <imgui.h>
+#include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -66,6 +68,10 @@ namespace vkof
 		char const * pathCompute;
 		srat::slice<char const * const> defines {};
 		srat::slice<char const * const> includePaths {};
+		// shown in the profiler window; the file's stem when null
+		char const * debugName { nullptr };
+		// shaderd builds it only after every non-deferred pipeline is done
+		bool deferred { false };
 	};
 
 	Pipeline pipeline_graphics_create(
@@ -76,8 +82,47 @@ namespace vkof
 		PipelineComputeCreateInfo const & createInfo
 	);
 
+	// compiles all pipelines concurrently; outPipelines[i] is createInfos[i]
+	void pipeline_compute_create_batch(
+		srat::slice<PipelineComputeCreateInfo const> const createInfos,
+		srat::slice<Pipeline> const outPipelines
+	);
+
 	void pipeline_destroy(Pipeline const & pipeline);
 
+	struct ShaderCacheConfigureInfo {
+		char const * sourceRoot;
+		char const * cacheDir;
+	};
+	void shader_cache_configure(ShaderCacheConfigureInfo const & info);
+
+	// a driver statistic of one pipeline executable, e.g. its register count
+	struct PipelineStatistic {
+		std::string executable;
+		std::string name;
+		std::string description;
+		std::string value;
+	};
+
+	struct PipelineComputeBinaryBuildResult {
+		bool ok;
+		std::string error;
+		std::vector<u8> binary;
+		u32 subgroupSize;
+		std::vector<PipelineStatistic> statistics;
+	};
+
+	// streaming multiprocessor limits, for occupancy estimates; 0 if unknown
+	struct DeviceShaderCoreInfo {
+		u32 smCount;
+		u32 warpsPerSm;
+		u32 maxSharedMemoryPerWorkgroup;
+	};
+	DeviceShaderCoreInfo device_shader_core_info();
+	PipelineComputeBinaryBuildResult pipeline_compute_binary_build(
+		srat::slice<u8 const> const spirv,
+		bool const captureBinary
+	);
 }
 
 // -----------------------------------------------------------------------------
@@ -300,6 +345,50 @@ namespace vkof
 		});
 	}
 
+	// group counts are a VkDispatchIndirectCommand (3 x u32) in the buffer
+	struct CmdDispatchIndirect {
+		CommandBuffer cmd;
+		Pipeline pipeline;
+		srat::slice<u8 const> pushconstant;
+		Buffer argumentBuffer;
+		u64 argumentByteOffset;
+	};
+	void cmd_dispatch_indirect(CmdDispatchIndirect const & dispatch);
+
+	template<typename PushT>
+	struct CmdDispatchIndirectPushconst {
+		CommandBuffer cmd;
+		Pipeline pipeline;
+		PushT push;
+		Buffer argumentBuffer;
+		u64 argumentByteOffset;
+	};
+	template<typename PushT>
+	inline void cmd_dispatch_indirect_pushconst(
+		CmdDispatchIndirectPushconst<PushT> const & info
+	) {
+		cmd_dispatch_indirect({
+			.cmd = info.cmd,
+			.pipeline = info.pipeline,
+			.pushconstant = srat::slice_as_bytes(info.push),
+			.argumentBuffer = info.argumentBuffer,
+			.argumentByteOffset = info.argumentByteOffset,
+		});
+	}
+
+	struct CmdFillBuffer {
+		CommandBuffer cmd;
+		Buffer buffer;
+		u64 byteOffset;
+		u64 byteCount;
+		u32 value;
+	};
+	void cmd_fill_buffer(CmdFillBuffer const & fill);
+
+	// orders dispatches and buffer fills within one render node: their writes
+	// are visible to later dispatches, including as indirect arguments
+	void cmd_barrier_compute(CommandBuffer const & cmd);
+
 	template<typename PushT>
 	struct CmdDrawPushconst {
 		CommandBuffer cmd;
@@ -400,6 +489,8 @@ namespace vkof
 
 	struct RenderNodeCreateInfo {
 		CommandQueue queue;
+		// shown in the profiler window
+		char const * debugName { nullptr };
 	};
 	RenderNode render_node_create(RenderNodeCreateInfo const & createInfo);
 	void render_node_destroy(RenderNode const & node);
@@ -471,6 +562,10 @@ namespace vkof
 	// returns 0.0 when timestamps are unsupported, no readback has
 	// happened yet, or nodeIndex wasn't profiled
 	double node_gpu_ms(u32 nodeIndex);
+
+	// a named value shown in the profiler window, averaged over its refresh
+	// interval; call each frame, before render_graph_execute
+	void profiler_value(char const * name, double value);
 }
 
 // -----------------------------------------------------------------------------
@@ -479,19 +574,13 @@ namespace vkof
 
 namespace vkof
 {
-	// enableValidation controls the vulkan validation layer (and, with it,
-	// debug_printf/validation_message capture -- see vkof::probe_message).
-	// off by default here since instance/device creation with the layer
-	// active is a meaningful chunk of windowed startup time and most
-	// interactive use doesn't need it; pass true (or the viewer's --debug
-	// flag) to get it back. init_headless has no such parameter: every
-	// headless caller is a test or screenshot path that depends on this
-	// capture for its own assertions, so it always stays on
 	void init(bool enableValidation = false);
 	// Headless init: no window, no surface, no swapchain.
 	// Uses a fixed offscreen extent (default 512x512).
 	// render_graph_execute skips acquire/present in this mode.
 	void init_headless(u32 width = 512, u32 height = 512);
+	// headless device for shaderd; no validation, no offscreen frame
+	void init_shader_compiler();
 	void shutdown();
 	void device_wait_idle();
 	GLFWwindow * window();

@@ -27,7 +27,7 @@ std::vector<XyCrosscheck> evaluate_xy_crosscheck(std::vector<f32v3> const & samp
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "shading_frame_xy_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/shading_frame_xy_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -80,7 +80,7 @@ std::vector<Frame> evaluate_from_tangent(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "shading_frame_from_tangent_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/shading_frame_from_tangent_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -129,7 +129,7 @@ std::vector<Frame> evaluate_rotate(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "shading_frame_rotate_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/shading_frame_rotate_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

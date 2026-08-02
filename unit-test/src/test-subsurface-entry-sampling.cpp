@@ -46,7 +46,7 @@ std::vector<u32> run_entry_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_entry_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_entry_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -85,7 +85,7 @@ std::vector<f32> run_entry_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_entry_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_entry_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -177,7 +177,7 @@ std::vector<u32> run_selection_fraction(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_entry_selection_fraction.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_entry_selection_fraction.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

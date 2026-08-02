@@ -21,7 +21,7 @@ std::vector<f32v2> evaluate_roughness_alpha(std::vector<f32v2> const & samples) 
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "roughness_alpha_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/roughness_alpha_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -63,7 +63,7 @@ std::vector<f32v4> evaluate_roughness_alpha_spec_crosscheck(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "roughness_alpha_spec_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/roughness_alpha_spec_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -103,7 +103,7 @@ std::vector<f32> evaluate_coat_roughened_roughness(std::vector<f32v3> const & sa
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "coat_roughened_roughness_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/coat_roughened_roughness_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

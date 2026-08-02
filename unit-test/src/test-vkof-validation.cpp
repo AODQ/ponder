@@ -30,7 +30,7 @@ TEST_CASE("vkof validation capture: a benign dispatch logs nothing") {
 
 	constexpr u32 kCount = 1024;
 	auto pl = vkof::pipeline_compute_create(
-		{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+		{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 	);
 	REQUIRE(pl.id != 0);
 	auto buf = test::make_buffer_u32(kCount);
@@ -46,6 +46,34 @@ TEST_CASE("vkof validation capture: a benign dispatch logs nothing") {
 	CHECK(result[0] == 7u);
 
 	vkof::buffer_destroy(buf);
+	vkof::pipeline_destroy(pl);
+}
+
+TEST_CASE("vkof debug printf: a slang printf reaches probe_message") {
+	struct PrintfPush { u32 value; };
+	auto const pl = (
+		vkof::pipeline_compute_create({
+			.pathCompute = TEST_SHADER_DIR "slang/entry/debug_printf.slang",
+			.includePaths = test::slang_include_paths(),
+		})
+	);
+	REQUIRE(pl.id != 0);
+	auto const push = PrintfPush { .value = 4242u };
+	test::dispatch(pl, push, 1u);
+	// readback-free dispatch: wait so the layer has flushed the printf
+	vkof::device_wait_idle();
+
+	u32 const count = vkof::probe_message_count();
+	bool found = false;
+	for (u32 i = 0u; i < count; ++i) {
+		std::string const message = vkof::probe_message(i);
+		found = found || message.find("debug-printf-probe 4242") != std::string::npos;
+	}
+	if (!found) {
+		MESSAGE("probe messages captured: ", count);
+	}
+	CHECK(found);
+
 	vkof::pipeline_destroy(pl);
 }
 

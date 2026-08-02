@@ -1,0 +1,5 @@
+{
+  "GpuEmitterNeeDebugBuffer": "u32",
+  "GpuGlobalExtendedBuffer": "GpuGlobalExtended",
+  "GpuProbeResultBuffer": "GpuProbeResult"
+}

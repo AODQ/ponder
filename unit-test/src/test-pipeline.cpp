@@ -6,7 +6,8 @@ TEST_SUITE("[headless]") {
 
 TEST_CASE("pipeline: compute create valid shader") {
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fill_u32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	CHECK(pl.id != 0);
 	vkof::pipeline_destroy(pl);
@@ -14,7 +15,8 @@ TEST_CASE("pipeline: compute create valid shader") {
 
 TEST_CASE("pipeline: compute create passthrough shader") {
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "passthrough.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/passthrough.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	CHECK(pl.id != 0);
 	vkof::pipeline_destroy(pl);
@@ -22,7 +24,8 @@ TEST_CASE("pipeline: compute create passthrough shader") {
 
 TEST_CASE("pipeline: destroy does not crash") {
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fill_u32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(pl.id != 0);
 	vkof::pipeline_destroy(pl);
@@ -32,10 +35,12 @@ TEST_CASE("pipeline: destroy does not crash") {
 
 TEST_CASE("pipeline: two compute pipelines have distinct ids") {
 	auto p0 = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fill_u32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	auto p1 = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "passthrough.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/passthrough.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(p0.id != 0);
 	REQUIRE(p1.id != 0);
@@ -46,13 +51,15 @@ TEST_CASE("pipeline: two compute pipelines have distinct ids") {
 
 TEST_CASE("pipeline: re-create after destroy") {
 	auto p0 = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fill_u32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(p0.id != 0);
 	vkof::pipeline_destroy(p0);
 
 	auto p1 = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fill_u32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	CHECK(p1.id != 0);
 	vkof::pipeline_destroy(p1);
@@ -78,7 +85,8 @@ TEST_CASE("pipeline: graphics create") {
 TEST_CASE("pipeline: rapid compute create/destroy cycle") {
 	for (u32 i = 0u; i < 32u; i++) {
 		vkof::Pipeline const pl = vkof::pipeline_compute_create({
-			.pathCompute = TEST_SHADER_DIR "passthrough.comp",
+			.pathCompute = TEST_SHADER_DIR "slang/entry/passthrough.slang",
+			.includePaths = test::slang_include_paths(),
 		});
 		CHECK(pl.id != 0u);
 		vkof::pipeline_destroy(pl);

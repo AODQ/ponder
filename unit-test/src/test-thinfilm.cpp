@@ -4,10 +4,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
+#include <optional>
+#include <random>
 #include <vector>
 
-// tests for the openpbr thin-film interference layer
-// (openPbrThinfilmFresnel, util-material-openpbr-thinfilm.glsl):
+// tests for the openpbr thin-film interference layer, now the lib's
+// vkof::bsdfOpenPbrThinfilmFresnel (rgb). the old pipeline's copy keeps the
+// C_m = (R - T_{12}^2) bug; the metallic furnace test below still uses it.
+// history:
 // belcour & barla 2017's practical extension to microfacet theory for
 // varying iridescence, replacing the plain fresnel term at the metallic
 // and dielectric-specular interfaces with a wavelength-aware interference
@@ -213,8 +218,8 @@ RefRgb ref_thinfilm_fresnel(
 		f64 const C0p = p12.Rp + Rsp;
 		I[c] = 0.5 * (C0s * S0arr[c] + C0p * S0arr[c]);
 
-		Cms[c] = Rss - T121s;
-		Cmp[c] = Rsp - T121p;
+		Cms[c] = Rss - T12s;
+		Cmp[c] = Rsp - T12p;
 	}
 
 	for (int m = 1; m <= 3; ++m) {
@@ -268,10 +273,14 @@ std::vector<f32v3> evaluate_thinfilm(std::vector<f32> const & samplesFlat) {
 	u32 const count = (u32)samplesFlat.size() / 9u;
 	REQUIRE(samplesFlat.size() == (size_t)count * 9u);
 
-	char const * const includePaths[] = { PONDER_SHADER_DIR };
+	char const * const includePaths[] = {
+		PONDER_SHADER_DIR, PONDER_SHADER_NEW_DIR,
+	};
+	char const * const defines[] = { "PONDER_SPECTRUM_RGB" };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thinfilm_evaluate.comp",
-		.includePaths = srat::slice<char const * const>(includePaths, 1),
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thinfilm_evaluate.slang",
+		.defines = srat::slice<char const * const>(defines, 1),
+		.includePaths = srat::slice<char const * const>(includePaths, 2),
 	});
 	REQUIRE(pl.id != 0);
 
@@ -325,10 +334,14 @@ void crosscheck_thinfilm(
 	u32 const count = (u32)samplesFlat.size() / 4u;
 	REQUIRE(samplesFlat.size() == (size_t)count * 4u);
 
-	char const * const includePaths[] = { PONDER_SHADER_DIR };
+	char const * const includePaths[] = {
+		PONDER_SHADER_DIR, PONDER_SHADER_NEW_DIR,
+	};
+	char const * const defines[] = { "PONDER_SPECTRUM_RGB" };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thinfilm_crosscheck.comp",
-		.includePaths = srat::slice<char const * const>(includePaths, 1),
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thinfilm_crosscheck.slang",
+		.defines = srat::slice<char const * const>(defines, 1),
+		.includePaths = srat::slice<char const * const>(includePaths, 2),
 	});
 	REQUIRE(pl.id != 0);
 
@@ -398,7 +411,7 @@ std::vector<f32v3> integrate_thinfilm_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "thinfilm_metallic_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/thinfilm_metallic_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -435,6 +448,119 @@ std::vector<f32v3> integrate_thinfilm_furnace(
 	vkof::buffer_destroy(outBuf);
 	vkof::pipeline_destroy(pl);
 	return out;
+}
+
+// -----------------------------------------------------------------------------
+// -- spectral thin film
+// -----------------------------------------------------------------------------
+
+struct SpectralThinfilmSample {
+	f32 cosThetaI;
+	f32 thickness;
+	f32 filmIor;
+	f32 etaBase;
+	f32 lambda[4];
+};
+
+// thinfilm-spectral-evaluate.slang, spectral build: 8 floats in, 4 out
+std::vector<f32v4> evaluate_thinfilm_spectral(
+	std::vector<SpectralThinfilmSample> const & samples
+) {
+	u32 const count = (u32)samples.size();
+	std::vector<f32> flat;
+	flat.reserve(count * 8u);
+	for (SpectralThinfilmSample const & s : samples) {
+		flat.emplace_back(s.cosThetaI);
+		flat.emplace_back(s.thickness);
+		flat.emplace_back(s.filmIor);
+		flat.emplace_back(s.etaBase);
+		for (u32 k = 0u; k < 4u; ++k) {
+			flat.emplace_back(s.lambda[k]);
+		}
+	}
+
+	char const * const includePaths[] = { PONDER_SHADER_NEW_DIR };
+	vkof::Pipeline const pl = (
+		vkof::pipeline_compute_create({
+			.pathCompute = (
+				TEST_SHADER_DIR "slang/entry/thinfilm-spectral-evaluate.slang"
+			),
+			.includePaths = srat::slice<char const * const>(includePaths, 1),
+		})
+	);
+	REQUIRE(pl.id != 0);
+
+	vkof::Buffer const inBuf = (
+		vkof::buffer_create({
+			.byteCount = flat.size() * sizeof(f32),
+			.memory = vkof::BufferMemory::HostWritable,
+		})
+	);
+	vkof::buffer_upload({
+		.buffer = inBuf,
+		.byteOffset = 0,
+		.data = srat::slice<u8 const>(
+			reinterpret_cast<u8 const *>(flat.data()),
+			flat.size() * sizeof(f32)
+		),
+	});
+	vkof::Buffer const outBuf = (
+		vkof::buffer_create({
+			.byteCount = count * sizeof(f32v4),
+			.memory = vkof::BufferMemory::DeviceOnly,
+		})
+	);
+
+	struct Push { u64 inVa; u64 outVa; u32 count; };
+	Push const push {
+		.inVa = vkof::buffer_virtual_address(inBuf),
+		.outVa = vkof::buffer_virtual_address(outBuf),
+		.count = count,
+	};
+	test::dispatch(pl, push, groups_for(count));
+	std::vector<f32v4> const out = test::readback<f32v4>(outBuf, 0, count);
+
+	vkof::buffer_destroy(inBuf);
+	vkof::buffer_destroy(outBuf);
+	vkof::pipeline_destroy(pl);
+	return out;
+}
+
+// exact airy reflectance of a film on a real base, unpolarized, from complex
+// amplitudes; independent of the belcour & barla series. nullopt under total
+// internal reflection, where the lib uses R = 1, phi = 0 instead
+std::optional<f64> ref_airy_reflectance(
+	f64 const cosThetaI,
+	f64 const thickness,
+	f64 const filmIor,
+	f64 const etaBase,
+	f64 const lambdaNm
+) {
+	f64 const n1 = 1.0;
+	f64 const n2 = filmIor;
+	f64 const n3 = etaBase;
+	f64 const sin1Sq = 1.0 - cosThetaI * cosThetaI;
+	f64 const sin2Sq = (n1 / n2) * (n1 / n2) * sin1Sq;
+	f64 const cos2 = std::sqrt(1.0 - sin2Sq);
+	f64 const sin3Sq = (n2 / n3) * (n2 / n3) * (1.0 - cos2 * cos2);
+	if (sin3Sq >= 1.0) { return std::nullopt; }
+	f64 const cos3 = std::sqrt(1.0 - sin3Sq);
+
+	// amplitude coefficients, same sign convention as the lib's phases
+	f64 const rs12 = (n2 * cosThetaI - n1 * cos2) / (n2 * cosThetaI + n1 * cos2);
+	f64 const rp12 = (n1 * cosThetaI - n2 * cos2) / (n1 * cosThetaI + n2 * cos2);
+	f64 const rs23 = (n3 * cos2 - n2 * cos3) / (n3 * cos2 + n2 * cos3);
+	f64 const rp23 = (n2 * cos2 - n3 * cos3) / (n2 * cos2 + n3 * cos3);
+
+	// round-trip phase, thickness in micrometers
+	f64 const delta = (
+		2.0 * kPi * (2.0 * n2 * thickness * cos2) / (lambdaNm * 1e-3)
+	);
+	std::complex<f64> const e = std::polar(1.0, delta);
+	auto const airy = [&](f64 const r12, f64 const r23) {
+		return std::norm((r12 + r23 * e) / (1.0 + r12 * r23 * e));
+	};
+	return 0.5 * (airy(rs12, rs23) + airy(rp12, rp23));
 }
 
 } // namespace
@@ -614,26 +740,16 @@ TEST_CASE("thin-film: matches materialx mx_fresnel_airy on a dense grid (real ba
 			std::abs((f64)mine[i].z - (f64)ref[i].z),
 		});
 		maxAbsDiff = std::max(maxAbsDiff, d);
-		// generous absolute tolerance: ponder/cull's phase shift uses a
-		// sign-based simplification (phi = (r < 0) ? pi : 0 per
-		// polarization, blender cycles' simplification) while materialx's
-		// mx_fresnel_airy instead gates on a single brewster-angle test
-		// (cosTheta vs cos(atan(eta2/eta1))) shared between both
-		// polarizations -- two different simplifications of the same
-		// belcour & barla 2017 model, not a port bug. this bound is set
-		// from what the grid above actually measures (see the milestone
-        // report for the observed worst-case)
-		CHECK(d < 0.35);
+		// measured worst ~0.0073 (2026-11-21); the 0.35 this used to need
+		// was the C_m = (R - T_{12}^2) bug, now (R - T_{12})
+		CHECK(d < 0.01);
 	}
 	MESSAGE("materialx airy crosscheck max abs diff (any channel): ", maxAbsDiff);
 }
 
 TEST_CASE("thin-film: matches materialx mx_fresnel_airy near-normal incidence tightly") {
-	// away from grazing incidence the brewster-angle gate and the
-	// sign-based phase test overwhelmingly agree (both amount to "is this
-	// a low-to-high ior step"), so near-normal incidence is where the two
-	// formulations should track closely rather than just within the
-	// generous whole-domain bound above
+	// near-normal incidence, where the phase conventions agree exactly;
+	// measured worst ~5e-5
 	std::vector<f32> flat;
 	for (f32 fi : { 1.2f, 1.5f, 2.0f }) {
 		for (f32 th : { 0.05f, 0.2f, 0.5f, 1.0f }) {
@@ -649,7 +765,7 @@ TEST_CASE("thin-film: matches materialx mx_fresnel_airy near-normal incidence ti
 	for (u32 i = 0; i < mine.size(); ++i) {
 		CAPTURE(i);
 		worst = std::max(worst, std::abs((f64)mine[i].x - (f64)ref[i].x));
-		CHECK(mine[i].x == doctest::Approx(ref[i].x).epsilon(0.08));
+		CHECK(std::abs((f64)mine[i].x - (f64)ref[i].x) < 5e-4);
 	}
 	MESSAGE("normal-incidence airy crosscheck worst diff: ", worst);
 }
@@ -908,6 +1024,108 @@ TEST_CASE("thin-film: brdf disk, iridescent metal") {
 	CHECK(ok);
 	CAPTURE(nanCount);
 	CHECK(nanCount == 0);
+}
+
+TEST_CASE("thin-film spectral: matches the exact airy reflectance per wavelength") {
+	std::mt19937 rng(77u);
+	std::uniform_real_distribution<f32> unit(0.0f, 1.0f);
+	auto const range = [&](f32 const lo, f32 const hi) {
+		return lo + (hi - lo) * unit(rng);
+	};
+
+	// -- fuzzed configurations, thickness past the 0.03 ior fade-in
+	std::vector<SpectralThinfilmSample> samples;
+	std::vector<f64> expected;
+	while (samples.size() < 2048u) {
+		SpectralThinfilmSample s {};
+		s.cosThetaI = range(0.05f, 1.0f);
+		s.thickness = range(0.05f, 1.5f);
+		s.filmIor = range(1.1f, 2.5f);
+		s.etaBase = range(1.1f, 3.0f);
+		for (u32 k = 0u; k < 4u; ++k) {
+			s.lambda[k] = range(380.0f, 780.0f);
+		}
+		std::optional<f64> refs[4];
+		bool usable = true;
+		for (u32 k = 0u; k < 4u && usable; ++k) {
+			refs[k] = (
+				ref_airy_reflectance(
+					s.cosThetaI, s.thickness, s.filmIor, s.etaBase, s.lambda[k]
+				)
+			);
+			usable = refs[k].has_value();
+		}
+		if (!usable) { continue; }
+		samples.emplace_back(s);
+		for (u32 k = 0u; k < 4u; ++k) {
+			expected.emplace_back(*refs[k]);
+		}
+	}
+	std::vector<f32v4> const result = evaluate_thinfilm_spectral(samples);
+
+	f64 worst = 0.0;
+	for (u32 i = 0u; i < (u32)samples.size(); ++i) {
+		f32 const got[4] = { result[i].x, result[i].y, result[i].z, result[i].w };
+		for (u32 k = 0u; k < 4u; ++k) {
+			f64 const d = std::abs((f64)got[k] - expected[i * 4u + k]);
+			worst = std::max(worst, d);
+			CAPTURE(i);
+			CAPTURE(k);
+			CHECK(std::isfinite(got[k]));
+			CHECK(d < 2e-3);
+		}
+	}
+	MESSAGE("spectral thin-film vs exact airy, worst abs diff: ", worst);
+}
+
+TEST_CASE("thin-film spectral: zero thickness reduces to plain dielectric fresnel") {
+	std::vector<SpectralThinfilmSample> samples;
+	std::vector<f64> expected;
+	for (f32 const mu : { 0.1f, 0.4f, 0.7f, 1.0f }) {
+		for (f32 const eta : { 1.3f, 1.5f, 2.4f }) {
+			samples.emplace_back(SpectralThinfilmSample {
+				.cosThetaI = mu,
+				.thickness = 0.0f,
+				.filmIor = 1.8f,
+				.etaBase = eta,
+				.lambda = { 400.0f, 500.0f, 600.0f, 700.0f },
+			});
+			// the film fades to ior 1 at zero thickness: air onto the base
+			f64 const fresnel = (
+				*ref_airy_reflectance(mu, 0.0, 1.0, eta, 550.0)
+			);
+			expected.emplace_back(fresnel);
+		}
+	}
+	std::vector<f32v4> const result = evaluate_thinfilm_spectral(samples);
+	for (u32 i = 0u; i < (u32)samples.size(); ++i) {
+		f32 const got[4] = { result[i].x, result[i].y, result[i].z, result[i].w };
+		for (u32 k = 0u; k < 4u; ++k) {
+			CAPTURE(i);
+			CAPTURE(k);
+			CHECK(std::abs((f64)got[k] - expected[i]) < 1e-4);
+		}
+	}
+}
+
+TEST_CASE("thin-film spectral: interference varies with wavelength") {
+	// a 0.4 micrometer soap-like film on glass at normal incidence passes
+	// through several interference orders across the visible range
+	std::vector<SpectralThinfilmSample> const samples {
+		SpectralThinfilmSample {
+			.cosThetaI = 1.0f,
+			.thickness = 0.4f,
+			.filmIor = 1.33f,
+			.etaBase = 1.5f,
+			.lambda = { 420.0f, 500.0f, 580.0f, 660.0f },
+		},
+	};
+	std::vector<f32v4> const result = evaluate_thinfilm_spectral(samples);
+	f32 const got[4] = { result[0].x, result[0].y, result[0].z, result[0].w };
+	f32 const lo = std::min({ got[0], got[1], got[2], got[3] });
+	f32 const hi = std::max({ got[0], got[1], got[2], got[3] });
+	MESSAGE("reflectance across 420..660 nm: ", lo, " .. ", hi);
+	CHECK(hi - lo > 0.01f);
 }
 
 } // TEST_SUITE("[headless]")

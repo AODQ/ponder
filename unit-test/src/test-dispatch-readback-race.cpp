@@ -33,7 +33,7 @@ static u32 groups_for(u32 count) { return (count + kLocalSize - 1) / kLocalSize;
 // bit-exact (not statistical) correctness check.
 void light_fill_check(u32 const count, u32 const value, char const * const label) {
 	auto pl = vkof::pipeline_compute_create(
-		{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+		{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 	);
 	REQUIRE(pl.id != 0);
 	auto buf = test::make_buffer_u32(count);

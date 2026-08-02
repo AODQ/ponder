@@ -124,7 +124,7 @@ RenderResult render_subsurface_box(
 ) {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -199,7 +199,7 @@ RenderResult render_subsurface_box(
 		PONDER_SHADER_DIR, MOR_INCLUDE_DIR, APP_SHADER_DIR,
 	};
 	auto const pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_furnace_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_furnace_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 3u),
 	});
 	REQUIRE(pl.id != 0u);
@@ -236,7 +236,20 @@ RenderResult render_subsurface_box(
 		.envMap = 0u,
 		.envRotation = 0.0f,
 		.envNeeEnabled = 1u,
-		.envMapOnlyMode = 0u,
+		.emitterLights = 0u,
+		.emitterLightCount = 0u,
+		.meshNeeEnabled = 0u,
+		.manifoldNeeEnabled = 0u,
+		.envLightIndex = 0u,
+		.emitterNeeDebug = 0u,
+		.regirGuards = 0u,
+		.regirCells = 0u,
+		.regirReservoirs = 0u,
+		.regirCellCount = 0u,
+		.regirFrameIndex = 0u,
+		.regirCellSize = 0.0f,
+		.regirEnabled = 0u,
+		.envMapOnlyDepth = 0u,
 		.fireflyClampLuminance = 0.0f,
 		.envBackgroundIntensity = 1.0f,
 		.vdb = 0u,
@@ -270,6 +283,8 @@ RenderResult render_subsurface_box(
 		.flatIndices = bufs.flatIndices,
 		.flatMeshlets = bufs.flatMeshlets,
 		.modelMatrix = f32m44_identity(),
+		.emitterLightOffset = 0u,
+		.emitterLightCount = 0u,
 	};
 	vkof::buffer_upload({
 		.buffer = modelsBuf,
@@ -534,7 +549,7 @@ struct SubsurfaceProbePush {
 TEST_CASE("DEBUG: probe material.subsurfaceColor at the hit point") {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/Box/glTF/Box.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Box.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -626,7 +641,7 @@ TEST_CASE("DEBUG: probe material.subsurfaceColor at the hit point") {
 		PONDER_SHADER_DIR, MOR_INCLUDE_DIR, APP_SHADER_DIR,
 	};
 	auto const pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_material_probe.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_material_probe.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 3u),
 	});
 	REQUIRE(pl.id != 0u);
@@ -656,6 +671,8 @@ TEST_CASE("DEBUG: probe material.subsurfaceColor at the hit point") {
 		.flatIndices = bufs.flatIndices,
 		.flatMeshlets = bufs.flatMeshlets,
 		.modelMatrix = f32m44_identity(),
+		.emitterLightOffset = 0u,
+		.emitterLightCount = 0u,
 	};
 	vkof::buffer_upload({
 		.buffer = modelsBuf,

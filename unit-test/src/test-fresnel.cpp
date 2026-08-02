@@ -21,7 +21,7 @@ std::vector<f32> evaluate_dielectric(std::vector<f32v2> const & samples) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fresnel_dielectric_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fresnel_dielectric_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -64,7 +64,7 @@ std::vector<f32v3> evaluate_metallic(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fresnel_metallic_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fresnel_metallic_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -108,7 +108,7 @@ std::vector<f32v2> evaluate_dielectric_crosscheck(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fresnel_dielectric_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fresnel_dielectric_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -159,7 +159,7 @@ MetallicCrosscheck evaluate_metallic_crosscheck(std::vector<f32> const & samples
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fresnel_metallic_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fresnel_metallic_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -93,7 +93,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	// TODO below is temp
 	// -- initialize application arguments
 	char const * const defaultPath = (
-		"assets/Models/ABeautifulGame/glTF/ABeautifulGame.gltf"
+		"assets/models-categorized/production-scene/ABeautifulGame.glb"
 	);
 	char const * const defaultEnvPath = (
 		"assets/environments/kloofendal_48d_partly_cloudy_puresky_4k.exr"
@@ -169,7 +169,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const skVisibilityResolvePipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appShaderDir/"scene-visibility-resolve.comp").string().c_str()
+				(appShaderDir/"scene-visibility-resolve.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})

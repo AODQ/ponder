@@ -95,7 +95,7 @@ std::vector<f32> run_sweep(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fuzz_sample_sweep.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fuzz_sample_sweep.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -137,7 +137,7 @@ std::vector<u32> run_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -179,7 +179,7 @@ std::vector<f32> run_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -379,7 +379,7 @@ TEST_CASE("fuzz sampler: unit length, upper hemisphere, pdf > 0 at own samples (
 		push10(flat, nor2, wi, fuzzA, fuzzB, { rng.next(), rng.next() });
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_sample_evaluate.comp", flat, 10u, 4u
+		TEST_SHADER_DIR "slang/entry/fuzz_sample_evaluate.slang", flat, 10u, 4u
 	);
 	u32 lenFailures = 0u;
 	u32 horizonFailures = 0u;
@@ -427,7 +427,7 @@ TEST_CASE("fuzz sampler: golden -- xi.x = 0 always samples exactly grazing") {
 		);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_sample_evaluate.comp", flat, 10u, 4u
+		TEST_SHADER_DIR "slang/entry/fuzz_sample_evaluate.slang", flat, 10u, 4u
 	);
 	for (u32 i = 0; i < kCount; ++i) {
 		CAPTURE(i);
@@ -457,7 +457,7 @@ TEST_CASE("fuzz sampler: golden -- xi.x = 1 samples the closed-form apex cosine"
 		);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_sample_evaluate.comp", flat, 10u, 4u
+		TEST_SHADER_DIR "slang/entry/fuzz_sample_evaluate.slang", flat, 10u, 4u
 	);
 	for (u32 i = 0; i < kCount; ++i) {
 		CAPTURE(i);
@@ -489,7 +489,7 @@ TEST_CASE("fuzz sampler: degenerate wi parallel/antiparallel to nor stay finite"
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_sample_evaluate.comp", flat, 10u, 4u
+		TEST_SHADER_DIR "slang/entry/fuzz_sample_evaluate.slang", flat, 10u, 4u
 	);
 	for (u32 i = 0; i < out.size() / 4u; ++i) {
 		CAPTURE(i);
@@ -530,10 +530,10 @@ TEST_CASE("fuzz pdf: rotation invariance") {
 		);
 	}
 	auto const base = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_pdf_evaluate.comp", flatBase, 11u, 1u
+		TEST_SHADER_DIR "slang/entry/fuzz_pdf_evaluate.slang", flatBase, 11u, 1u
 	);
 	auto const rotated = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_pdf_evaluate.comp", flatRotated, 11u, 1u
+		TEST_SHADER_DIR "slang/entry/fuzz_pdf_evaluate.slang", flatRotated, 11u, 1u
 	);
 	u32 mismatches = 0u;
 	for (u32 i = 0; i < kCount; ++i) {
@@ -625,7 +625,7 @@ TEST_CASE("fuzz pdf: integrates to ~1 over the sphere") {
 		flat.push_back(c.fuzzA); flat.push_back(c.fuzzB);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_pdf_integrate.comp", flat, 8u, 1u
+		TEST_SHADER_DIR "slang/entry/fuzz_pdf_integrate.slang", flat, 8u, 1u
 	);
 	for (u32 i = 0; i < configs.size(); ++i) {
 		CAPTURE(i);
@@ -652,7 +652,7 @@ TEST_CASE("fuzz pdf: sphere-integral heatmap (incidence x fuzzA)") {
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_pdf_integrate.comp", flat, 8u, 1u
+		TEST_SHADER_DIR "slang/entry/fuzz_pdf_integrate.slang", flat, 8u, 1u
 	);
 	std::vector<f32> img(out.size());
 	f64 maxDeviation = 0.0;
@@ -717,7 +717,7 @@ TEST_CASE("fuzz pdf vs materialx zeltner sheen brdf: algebraic cross-check") {
 		flat.push_back(roughness);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_pdf_crosscheck.comp", flat, 7u, 2u
+		TEST_SHADER_DIR "slang/entry/fuzz_pdf_crosscheck.slang", flat, 7u, 2u
 	);
 	u32 mismatches = 0u;
 	for (u32 i = 0; i < kCount; ++i) {
@@ -758,7 +758,7 @@ TEST_CASE("fuzz sampler vs materialx zeltner importance sample: matched-xi cross
 		flat.push_back(rng.next()); flat.push_back(rng.next());
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "fuzz_sample_crosscheck.comp", flat, 6u, 8u
+		TEST_SHADER_DIR "slang/entry/fuzz_sample_crosscheck.slang", flat, 6u, 8u
 	);
 	u32 dirMismatches = 0u;
 	u32 pdfMismatches = 0u;

@@ -290,6 +290,17 @@ static bool fnImguiMaterial(
 #undef X
 	ImGui::Text("alphaCutoff");
 	changed |= ImGui::SliderFloat("##acutoff", &p.alphaCutoff, 0.0f, 1.0f);
+	// (TODO REVIEW)
+	ImGui::Text("alphaMode");
+	{
+		char const * const modeNames[] = { "opaque", "mask", "blend" };
+		int mode = (int)p.alphaMode;
+		if (ImGui::Combo("##amode", &mode, modeNames, 3)) {
+			p.alphaMode = (u32)mode;
+			changed = true;
+		}
+	}
+	// (TODO REVIEW)
 	return changed;
 }
 

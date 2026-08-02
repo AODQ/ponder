@@ -45,7 +45,7 @@ TEST_CASE("rendernode: compute callback executes on GPU") {
 	constexpr u32 kCount = 256;
 	constexpr u32 kValue = 0xABCD1234u;
 
-	auto pl  = vkof::pipeline_compute_create({ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" });
+	auto pl  = vkof::pipeline_compute_create({ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() });
 	auto buf = test::make_buffer_u32(kCount);
 	REQUIRE(pl.id != 0);
 
@@ -207,7 +207,7 @@ TEST_CASE("rendernode: persistent image declared") {
 TEST_CASE("rendernode: two sequential executes") {
 	constexpr u32 kCount = 64;
 
-	auto pl  = vkof::pipeline_compute_create({ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" });
+	auto pl  = vkof::pipeline_compute_create({ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() });
 	auto buf = test::make_buffer_u32(kCount);
 	REQUIRE(pl.id != 0);
 

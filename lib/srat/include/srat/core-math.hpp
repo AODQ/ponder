@@ -113,6 +113,21 @@ inline u32v3 u32v3_min(u32v3 const a, u32v3 const b) {
 }
 
 // -----------------------------------------------------------------------------
+// -- i32v3
+// -----------------------------------------------------------------------------
+
+struct i32v3 {
+	i32 x, y, z;
+
+	i32v3 operator+(i32v3 const s) const { return { x+s.x, y+s.y, z+s.z}; }
+	i32v3 operator-(i32v3 const s) const { return { x-s.x, y-s.y, z-s.z}; }
+	i32v3 operator*(i32v3 const s) const { return { x*s.x, y*s.y, z*s.z}; }
+	i32v3 operator/(i32v3 const s) const { return { x/s.x, y/s.y, z/s.z}; }
+
+	bool operator==(i32v3 const & s) const = default;
+};
+
+// -----------------------------------------------------------------------------
 // -- f32v2
 // -----------------------------------------------------------------------------
 

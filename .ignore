@@ -1,6 +1,7 @@
 assets/
 screenshots/
 *.spirv
+*.spv
 *.stage
 third-party/
 unit-test/

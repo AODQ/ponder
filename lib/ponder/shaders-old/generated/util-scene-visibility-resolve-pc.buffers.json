@@ -1,0 +1,4 @@
+{
+  "GpuResolveModelIndirectBuffer": "GpuResolveModelIndirect",
+  "GpuProbeResultBuffer": "GpuProbeResult"
+}

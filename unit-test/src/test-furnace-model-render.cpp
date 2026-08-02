@@ -1,11 +1,9 @@
-// disabled for now
-#if 0
-
 #include <doctest/doctest.h>
 #include <vkof/vkof.hpp>
 #include <srat/camera.hpp>
 #include <mor/mor.hpp>
 #include <mor/mor-shared.h>
+#include <ponder/emitter-tables.hpp>
 #include <ponder/energy-tables.hpp>
 #include <ponder/zeltner-tables.hpp>
 #include "util.hpp"
@@ -20,7 +18,7 @@
 
 
 // ---------------------------------------------------------------------------
-// loads real glTF models (assets/Models, copied wholesale from the cull
+// loads real glTF models (assets/models-categorized, copied wholesale from the cull
 // sample-asset set) and furnace-tests each one through the exact production
 // path tracer -- furnace_model_render.comp calls utilTraceRay and
 // utilIrradiancePropagationEntry, the same functions resolve.comp calls, so
@@ -35,7 +33,7 @@
 // harness shape; DragonAttenuation adds full KHR_materials_transmission +
 // KHR_materials_volume (a smooth glass dragon with strong Beer-Lambert
 // attenuation), the transmission chain's own real-scene stress test. more
-// of assets/Models can be added the same way -- push a FurnaceModelConfig
+// of assets/models-categorized can be added the same way -- push a FurnaceModelConfig
 // and loop.
 // ---------------------------------------------------------------------------
 
@@ -43,7 +41,7 @@ namespace {
 
 struct FurnaceModelConfig {
 	char const * label;
-	// relative to REPO_DIR/assets/Models/
+	// relative to REPO_DIR/assets/models-categorized/
 	char const * relPath;
 	char const * outputName;
 	// azimuth/elevation/fov tuned per model so the camera lands somewhere
@@ -60,47 +58,63 @@ struct FurnaceModelConfig {
 	// not a bug) enough that the generic 5x-envIntensity firefly ceiling
 	// doesn't apply uniformly; let each config own its ceiling
 	f32 tooBrightMultiplier;
+	// (TODO REVIEW)
+	// tier 3.11 of plan-nee.md: build the scene's real emitter list and turn
+	// mesh nee on. only meaningful for a model that actually has emissive
+	// materials, and left off for the furnace configs above
+	bool meshNee;
+	// (TODO REVIEW)
+};
+
+// what the caller needs to compare two runs of the same model
+struct FurnaceModelResult {
+	f64 mean;
+	f32 maxValue;
+	u32 nonFiniteCount;
 };
 
 FurnaceModelConfig const skConfigs[] = {
 	{
 		.label = "Avocado",
-		.relPath = "Avocado/glTF/Avocado.gltf",
+		.relPath = "test-core/Avocado.glb",
 		.outputName = "furnace-avocado.png",
 		.azimuth = 0.6f,
 		.elevation = 0.35f,
 		.fovY = 0.5f,
 		.propagationDepth = 8u,
 		.tooBrightMultiplier = 5.0f,
+		.meshNee = false,
 	},
 	{
 		.label = "DragonAttenuation",
-		.relPath = "DragonAttenuation/glTF/DragonAttenuation.gltf",
+		.relPath = "test-transparency/DragonAttenuation.glb",
 		.outputName = "furnace-dragon-attenuation.png",
 		.azimuth = 0.5f,
 		.elevation = 0.25f,
 		.fovY = 1.5f,
 		.propagationDepth = 16u,
 		.tooBrightMultiplier = 20.0f,
+		.meshNee = false,
 	},
 	{
 		.label = "DispersionTest",
-		.relPath = "DispersionTest/glTF/DispersionTest.gltf",
+		.relPath = "test-transparency/DispersionTest.glb",
 		.outputName = "furnace-dispersion-test.png",
 		.azimuth = 0.0f,
 		.elevation = 0.15f,
 		.fovY = 1.5f,
 		.propagationDepth = 16u,
 		.tooBrightMultiplier = 20.0f,
+		.meshNee = false,
 	},
 };
 
-void run_furnace_model_render(FurnaceModelConfig const & config) {
+FurnaceModelResult run_furnace_model_render(FurnaceModelConfig const & config) {
 	std::string const label(config.label);
 	CAPTURE(label);
 
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/" + config.relPath
+		std::string(REPO_DIR) + "/assets/models-categorized/" + config.relPath
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 
@@ -109,7 +123,7 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 	mor::GpuScene gpuScene = mor::scene_gpu_upload(scene);
 	mor::Buffers const bufs = mor::scene_gpu_buffers(gpuScene);
 
-	// the sweep feeds every assets/Models entry through here, and a few of
+	// the sweep feeds every assets/models-categorized entry through here, and a few of
 	// those are geometry-free by design (camera/animation-only test assets)
 	// -- nothing to trace against, and blas_create on zero triangles is not
 	// a furnace failure, so bow out before touching the acceleration path
@@ -118,7 +132,7 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 		mor::scene_gpu_destroy(gpuScene);
 		mor::scene_destroy(scene);
 		mor::sampler_cache_destroy();
-		return;
+		return FurnaceModelResult { 0.0, 0.0f, 0u };
 	}
 
 	f32v3 boundsMin, boundsMax;
@@ -179,13 +193,17 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 		PONDER_SHADER_DIR, MOR_INCLUDE_DIR, APP_SHADER_DIR,
 	};
 	auto const pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "furnace_model_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/furnace_model_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 3u),
 	});
 	REQUIRE(pl.id != 0u);
 
-	u32 const width = 1920u;
-	u32 const height = 1080u;
+	// a nan/firefly probe wants paths, and paths are pixels x samples. the
+	// default halves each axis (a quarter of the work) and keeps the sample
+	// count, so per-pixel noise -- which is what the max-value ceiling is
+	// sensitive to -- is unchanged
+	u32 const width = test::thoroughEnabled ? 1920u : 960u;
+	u32 const height = test::thoroughEnabled ? 1080u : 540u;
 	u32 const pixelCount = width * height;
 	u32 const sampleCount = 64u;
 	f32 const envIntensity = 0.5f;
@@ -219,19 +237,71 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 		});
 	}
 
-	GpuGlobalExtended const extended = {
-		.envIntensity = envIntensity,
-		.renderWidth = width,
-		.renderHeight = height,
-		.envMode = 0, // ENV_MODE_FURNACE, see environment.glsl
-		.antialias = 0u,
-		.nanProbeCounterVa = vkof::buffer_virtual_address(nanProbeCounterBuf),
-		// this test never probes a material; unreachable by any coord
-		.probePixel = { -1, -1 },
-		.envMap = 0u,
-		.envRotation = 0.0f,
-		.envNeeEnabled = 0u,
-	};
+	// (TODO REVIEW)
+	// tier 3.11: the scene's own emitter list, built exactly as the viewer
+	// builds it per frame -- real gltf meshlets, real world areas, real
+	// emissive factors, rather than the hand-authored quads tiers 0-3 use
+	std::vector<GpuEmitterLight> emitterLights;
+	vkof::Buffer emitterBuf {};
+	ponder::EmitterRange emitterRange { 0u, 0u, 0u };
+	if (config.meshNee) {
+		std::vector<mor::MeshletAreaInfo> const areas = (
+			mor::scene_meshlet_area_info(scene)
+		);
+		std::vector<ponder::EmitterMeshletInput> inputs;
+		ponder::emitter_meshlet_inputs_from_scene(
+			scene, mor::GpuMaterials {},
+			srat::slice<mor::MeshletAreaInfo const>(areas.data(), areas.size()),
+			inputs
+		);
+		emitterRange = ponder::emitter_lights_append(
+			emitterLights,
+			srat::slice<ponder::EmitterMeshletInput const>(
+				inputs.data(), inputs.size()
+			),
+			f32m44_identity(), /*modelDrawIndex=*/0u, /*maxLights=*/65536u
+		);
+		(void)ponder::emitter_lights_finalize(emitterLights);
+		if (!emitterLights.empty()) {
+			emitterBuf = test::upload_bytes(
+				emitterLights.data(),
+				emitterLights.size() * sizeof(GpuEmitterLight)
+			);
+		}
+	}
+	// (TODO REVIEW)
+
+	// value-initialised then assigned rather than one designated initializer:
+	// GpuGlobalExtended keeps growing, and -Werror=missing-field-initializers
+	// turns every new field into a build break here
+	GpuGlobalExtended extended {};
+	extended.envIntensity = envIntensity;
+	extended.renderWidth = width;
+	extended.renderHeight = height;
+	// ENV_MODE_FURNACE, see environment.glsl
+	extended.envMode = 0;
+	extended.antialias = 0u;
+	extended.nanProbeCounterVa = (
+		vkof::buffer_virtual_address(nanProbeCounterBuf)
+	);
+	// this test never probes a material; unreachable by any coord
+	extended.probePixel = { -1, -1 };
+	extended.envMap = 0u;
+	extended.envRotation = 0.0f;
+	extended.envNeeEnabled = 0u;
+	extended.envBackgroundIntensity = 1.0f;
+	// (TODO REVIEW)
+	extended.emitterLights = (
+		emitterBuf.id != 0u ? vkof::buffer_virtual_address(emitterBuf) : 0u
+	);
+	extended.emitterLightCount = (u32)emitterLights.size();
+	extended.meshNeeEnabled = config.meshNee ? 1u : 0u;
+	// the environment is not in this list, so it keeps the whole pick mass on
+	// its own side and every entry here is a mesh emitter
+	extended.envLightIndex = (u32)emitterLights.size();
+	// (TODO REVIEW)
+	extended.vdbWorldToLocal = f32m44_identity();
+	extended.vdbPhaseAnisotropyOverride = -2.0f;
 	vkof::buffer_upload({
 		.buffer = debugPcBuf,
 		.byteOffset = 0u,
@@ -250,6 +320,9 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 		.flatIndices = bufs.flatIndices,
 		.flatMeshlets = bufs.flatMeshlets,
 		.modelMatrix = f32m44_identity(),
+		// the backward (bsdf-hit) lookup scans only this model's own range
+		.emitterLightOffset = emitterRange.offset,
+		.emitterLightCount = emitterRange.count,
 	};
 	vkof::buffer_upload({
 		.buffer = modelsBuf,
@@ -399,70 +472,48 @@ void run_furnace_model_render(FurnaceModelConfig const & config) {
 	// unowned by the scene, so it survives scene_gpu_destroy and must be
 	// torn down separately or the device destroy below warns about leaked
 	// VkSamplers (see main.cpp's shutdown sequence)
+	if (emitterBuf.id != 0u) { vkof::buffer_destroy(emitterBuf); }
 	mor::sampler_cache_destroy();
+	return FurnaceModelResult { mean, maxValue, nonFiniteCount };
 }
 
 struct SweepModel {
 	std::string label;
-	// relative to REPO_DIR/assets/Models/, same convention as
+	// relative to REPO_DIR/assets/models-categorized/, same convention as
 	// FurnaceModelConfig::relPath
 	std::string relPath;
 };
 
-// one entry per model directory under assets/Models, preferring the plain
-// glTF variant and falling back to glTF-Binary -- the remaining variant
-// directories (Draco, Embedded, Quantized, KTX-BasisU, ...) are
-// re-encodings of the same content, so sweeping them would only re-test
-// the loader, not the renderer
+// one entry per model file under assets/models-categorized/<category>/. the
+// tree now holds a single already-chosen variant per model rather than the old
+// per-model glTF/glTF-Binary/Draco/... directories, so there is nothing to
+// prefer between -- take every gltf/glb in the tree
 std::vector<SweepModel> enumerate_sweep_models() {
 	std::vector<SweepModel> models;
 	std::filesystem::path const root = (
-		std::filesystem::path(REPO_DIR) / "assets" / "Models"
+		std::filesystem::path(REPO_DIR) / "assets" / "models-categorized"
 	);
 	if (!std::filesystem::exists(root)) {
 		return models;
 	}
-	for (auto const & entry : std::filesystem::directory_iterator(root)) {
-		if (!entry.is_directory()) {
+	for (
+		auto const & entry
+		: std::filesystem::recursive_directory_iterator(root)
+	) {
+		if (!entry.is_regular_file()) {
 			continue;
 		}
-		struct Variant {
-			char const * dir;
-			char const * extension;
-		};
-		static Variant const skVariants[] = {
-			{ .dir = "glTF", .extension = ".gltf" },
-			{ .dir = "glTF-Binary", .extension = ".glb" },
-		};
-		for (Variant const & variant : skVariants) {
-			std::filesystem::path const variantDir = (
-				entry.path() / variant.dir
-			);
-			if (!std::filesystem::exists(variantDir)) {
-				continue;
-			}
-			bool found = false;
-			for (
-				auto const & file
-				: std::filesystem::directory_iterator(variantDir)
-			) {
-				if (file.path().extension() != variant.extension) {
-					continue;
-				}
-				models.push_back(SweepModel {
-					.label = entry.path().filename().string(),
-					.relPath = (
-						std::filesystem::relative(file.path(), root)
-							.generic_string()
-					),
-				});
-				found = true;
-				break;
-			}
-			if (found) {
-				break;
-			}
+		std::filesystem::path const & path = entry.path();
+		std::string const extension = path.extension().string();
+		if (extension != ".gltf" && extension != ".glb") {
+			continue;
 		}
+		models.push_back(SweepModel {
+			.label = path.stem().string(),
+			.relPath = (
+				std::filesystem::relative(path, root).generic_string()
+			),
+		});
 	}
 	std::sort(
 		models.begin(),
@@ -480,18 +531,18 @@ TEST_SUITE("[headless]") {
 
 TEST_CASE("furnace model render: no NaNs, no fireflies") {
 	for (FurnaceModelConfig const & config : skConfigs) {
-		run_furnace_model_render(config);
+		(void)run_furnace_model_render(config);
 	}
 }
 
-// opt-in: every model under assets/Models through the same furnace harness.
+// opt-in: every model under assets/models-categorized through the same furnace harness.
 // 159 models at full resolution is far too slow for the default suite, so
 // vkof-test skips this case unless launched with --furnace
-TEST_CASE("furnace model render: assets/Models sweep") {
+TEST_CASE("furnace model render: assets/models-categorized sweep") {
 	if (!test::furnaceSweepEnabled) {
 		MESSAGE(
 			"skipped: pass --furnace to vkof-test to run the full "
-			"assets/Models furnace sweep"
+			"assets/models-categorized furnace sweep"
 		);
 		return;
 	}
@@ -526,11 +577,92 @@ TEST_CASE("furnace model render: assets/Models sweep") {
 			// division spikes), which is the sweep's job -- NaN/Inf and
 			// the all-zero canary stay exact
 			.tooBrightMultiplier = 1000.0f,
+			// the sweep is a nan/firefly probe over the whole asset set; the
+			// nee integration gets its own case below on the emissive models
+			.meshNee = false,
 		};
-		run_furnace_model_render(config);
+		(void)run_furnace_model_render(config);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// tier 3.11 of plan-nee.md -- emissive-mesh nee against real authored geometry.
+//
+// Every other tier-3 case runs on hand-built buffers that are deliberately
+// clean: flat quads, one material, no degenerate triangles, no curved emitter
+// self-shadowing. This is the only one that points the sampler at geometry
+// somebody actually modelled, where it meets slivers, zero-area triangles,
+// grazing configurations and emissive meshlets spread over many materials.
+//
+// assets/models-categorized/test-emissive exists, so the emission is the
+// asset's own rather than forced on -- a truer test than overwriting the
+// materials, and it exercises the real gltf emissive load path with it.
+// ---------------------------------------------------------------------------
+TEST_CASE("furnace model render: emissive models agree with nee on and off") {
+	struct EmissiveModel {
+		char const * label;
+		char const * relPath;
+		char const * outputName;
+	};
+	static EmissiveModel const skEmissive[] = {
+		{
+			.label = "EmissiveStrengthTest",
+			.relPath = "test-emissive/EmissiveStrengthTest.glb",
+			.outputName = "furnace-nee-emissive-strength.png",
+		},
+		{
+			.label = "CompareEmissiveStrength",
+			.relPath = "test-emissive/CompareEmissiveStrength.glb",
+			.outputName = "furnace-nee-compare-emissive-strength.png",
+		},
+		{
+			.label = "PlaysetLightTest",
+			.relPath = "test-emissive/PlaysetLightTest.glb",
+			.outputName = "furnace-nee-playset-light.png",
+		},
+	};
+
+	for (EmissiveModel const & model : skEmissive) {
+		std::string const label(model.label);
+		CAPTURE(label);
+		FurnaceModelConfig config = {
+			.label = model.label,
+			.relPath = model.relPath,
+			.outputName = model.outputName,
+			.azimuth = 0.6f,
+			.elevation = 0.35f,
+			.fovY = 0.6f,
+			.propagationDepth = 8u,
+			// emissive assets are authored far above envIntensity by design
+			// (EmissiveStrengthTest sweeps KHR_materials_emissive_strength up
+			// to 1000), so a physical firefly ceiling cannot apply -- this
+			// only catches inf-adjacent blowups, and NaN stays exact
+			.tooBrightMultiplier = 100000.0f,
+			.meshNee = true,
+		};
+		FurnaceModelResult const on = run_furnace_model_render(config);
+		config.meshNee = false;
+		config.outputName = "furnace-nee-off-scratch.png";
+		FurnaceModelResult const off = run_furnace_model_render(config);
+
+		CHECK(on.nonFiniteCount == 0u);
+		CHECK(off.nonFiniteCount == 0u);
+		REQUIRE(off.mean > 0.0);
+
+		// no paired-realization sigma here: these renders are expensive and
+		// the emissive assets are dominated by directly-visible emitters,
+		// which both configs resolve identically and nearly noiselessly. a
+		// percent-scale relative gate is the honest instrument -- it catches
+		// the double-count and energy-loss failures the earlier tiers found
+		// (those were 15-70%), and does not pretend to resolve better
+		f64 const relative = std::abs(on.mean - off.mean) / off.mean;
+		MESSAGE(
+			"nee on/off ", label, ": on=", on.mean, " off=", off.mean,
+			" relative=", relative * 100.0, "%"
+		);
+		CHECK(relative < 0.03);
 	}
 }
 
 } // TEST_SUITE("[headless]")
-#endif
 

@@ -111,7 +111,7 @@ std::vector<f32v3> evaluate_blackbody(std::vector<f32> const & temperatures) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "blackbody_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/blackbody_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

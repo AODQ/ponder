@@ -779,7 +779,7 @@ TEST_CASE("dielectric: nested spheres ior sweep") {
 	auto energyTables = ponder::energy_tables_create();
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "dielectric_scene_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_scene_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -925,7 +925,7 @@ TEST_CASE("dielectric: hollow glass sphere vs checkerboard") {
 	auto energyTables = ponder::energy_tables_create();
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "dielectric_scene_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_scene_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -1113,7 +1113,7 @@ TEST_CASE("dielectric: bouncing sphere field") {
 	auto energyTables = ponder::energy_tables_create();
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "dielectric_scene_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_scene_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -1258,6 +1258,175 @@ TEST_CASE("dielectric: bouncing sphere field") {
 	save_png(
 		result.rgb, width, height,
 		DIELECTRIC_OUTPUT_DIR "dielectric-bouncing-spheres.png"
+	);
+
+	vkof::pipeline_destroy(pl);
+	scene_destroy(scene);
+	ponder::energy_tables_destroy(energyTables);
+}
+
+
+// ---------------------------------------------------------------------------
+// scene 4: refractive caustic baseline. a glass ball lens over a diffuse
+// floor, lit by one small quad overhead. the ball's paraxial back focal
+// length R(2 - n)/(2(n - 1)) puts the focus 0.25 below its rear surface --
+// exactly on the floor -- so a converged render carries a caustic cusp
+// directly under the sphere.
+//
+// that path class (diffuse floor -> two refractions -> small light) is the
+// one a plain path tracer cannot sample: nee's straight line is blocked by
+// the glass, and bsdf sampling has to stumble onto a small light through
+// two refractions. the peak-to-median floor ratio this case prints is the
+// instrument for plan-slang-caustics.md -- it should jump once manifold
+// sampling lands, and the --thorough render doubles as that plan's §13
+// brute-force reference.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("caustic: glass ball lens over floor") {
+	auto energyTables = ponder::energy_tables_create();
+	char const * const includePaths[] = { PONDER_SHADER_DIR };
+	auto pl = vkof::pipeline_compute_create({
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_scene_render.slang",
+		.includePaths = srat::slice<char const * const>(includePaths, 1),
+	});
+	REQUIRE(pl.id != 0);
+
+	u32 const width = 512u;
+	u32 const height = 384u;
+	// the caustic path needs 5 (floor, two interfaces, light); 8 leaves
+	// room for one internal reflection inside the ball
+	u32 const bounceCount = 8u;
+	// the default run is a smoke test; only --thorough converges far
+	// enough to serve as a reference (65536 spp lands around 20s here)
+	u32 const sampleCount = test::thoroughEnabled ? 65536u : 512u;
+
+	f32 const radius = 0.5f;
+	f32 const sphereY = 0.75f;
+	f32 const lightHalf = 0.15f;
+	f32 const lightY = 3.0f;
+	f32 const lightEmission = 120.0f;
+
+	std::vector<MeshData> meshes(3u);
+	meshes[0].vertices = {
+		{ -4.0f, 0.0f, -4.0f },
+		{ 4.0f, 0.0f, -4.0f },
+		{ 4.0f, 0.0f, 4.0f },
+		{ -4.0f, 0.0f, 4.0f },
+	};
+	meshes[0].indices.assign(skQuadIndices, skQuadIndices + 6);
+	// wound to emit downward only, same convention as skWallQuads' light
+	meshes[1].vertices = {
+		{ -lightHalf, lightY, -lightHalf },
+		{ lightHalf, lightY, -lightHalf },
+		{ lightHalf, lightY, lightHalf },
+		{ -lightHalf, lightY, lightHalf },
+	};
+	meshes[1].indices.assign(skQuadIndices, skQuadIndices + 6);
+	meshes[2] = sphere_mesh(64u, 96u);
+
+	u32 const skFloorIndex = 0u;
+	u32 const skLightIndex = 1u;
+	u32 const skSphereIndex = 2u;
+
+	std::vector<InstanceDef> const instances {
+		{ 0u, skIdentity, skFloorIndex },
+		{ 1u, skIdentity, skLightIndex },
+		{
+			2u,
+			transform_scale_translate(radius, 0.0f, sphereY, 0.0f),
+			skSphereIndex,
+		},
+	};
+
+	std::vector<InstanceRecord> records;
+	records.push_back(record_diffuse(0.75f, 0.75f, 0.75f));
+	records.push_back(record_diffuse(0.0f, 0.0f, 0.0f, lightEmission));
+	// a sharp interface: any roughness here smears the cusp the caustic
+	// sampler is meant to resolve
+	InstanceRecord glass = record_glass(1.5f);
+	glass.specularRoughness = 0.0f;
+	records.push_back(glass);
+
+	auto const scene = scene_create(meshes, instances);
+	vkof::acceleration_structure_set_tlas(scene.tlas);
+	// the quads carry no sphere flag, so the shader reads their geometric
+	// normal from these buffers
+	for (u32 const mesh : { skFloorIndex, skLightIndex }) {
+		records[mesh].vertexVa = vkof::buffer_virtual_address(
+			scene.vertexBuffers[mesh]
+		);
+		records[mesh].indexVa = vkof::buffer_virtual_address(
+			scene.indexBuffers[mesh]
+		);
+	}
+
+	// low and in front, so the floor under the ball stays unoccluded
+	Camera const camera = camera_look_at(
+		0.0f, 2.0f, -4.0f,
+		0.0f, 0.3f, 0.0f,
+		0.5f, 0.5f * 384.0f / 512.0f
+	);
+
+	auto const result = render_scene({
+		.pipeline = pl,
+		.records = &records,
+		.camera = camera,
+		.width = width,
+		.height = height,
+		.sampleCount = sampleCount,
+		.bounceCount = bounceCount,
+		.sky = false,
+		.kullaContyHandle = energyTables.kullaContyEnergyHandle,
+	});
+
+	auto const stats = image_stats(result.rgb);
+	CHECK(stats.nanCount == 0u);
+	CHECK(stats.minValue >= 0.0f);
+
+	// floor and sphere both resolve in primary hits; no stray indices
+	u32 pixelCount = width * height;
+	u32 floorPixels = 0u;
+	u32 spherePixels = 0u;
+	u32 invalidPixels = 0u;
+	std::vector<f64> floorLuminance;
+	for (u32 i = 0u; i < pixelCount; ++i) {
+		u32 const inst = result.primaryHit[i];
+		if (inst == 0xFFFFFFFFu) { continue; }
+		if (inst > skSphereIndex) { invalidPixels++; continue; }
+		if (inst == skSphereIndex) { spherePixels++; continue; }
+		if (inst != skFloorIndex) { continue; }
+		floorPixels++;
+		floorLuminance.push_back(
+			0.2126 * result.rgb[i]
+			+ 0.7152 * result.rgb[pixelCount + i]
+			+ 0.0722 * result.rgb[2u * pixelCount + i]
+		);
+	}
+	CHECK(invalidPixels == 0u);
+	CHECK(floorPixels > pixelCount / 4u);
+	CHECK(spherePixels > 500u);
+	REQUIRE(floorLuminance.size() > 1000u);
+
+	// the lit floor is the median; the caustic, when it converges, is the
+	// tail. a single fireflied pixel must not be able to move the ratio,
+	// hence p99.9 rather than max
+	std::sort(floorLuminance.begin(), floorLuminance.end());
+	f64 const floorMedian = floorLuminance[floorLuminance.size() / 2u];
+	f64 const floorPeak = floorLuminance[
+		(floorLuminance.size() * 999u) / 1000u
+	];
+	CHECK(floorMedian > 0.0);
+
+	MESSAGE(
+		"floor median ", floorMedian,
+		" p99.9 ", floorPeak,
+		" ratio ", floorPeak / std::max(floorMedian, 1e-9),
+		" at ", sampleCount, " spp"
+	);
+
+	save_png(
+		result.rgb, width, height,
+		DIELECTRIC_OUTPUT_DIR "caustic-glass-ball-lens.png"
 	);
 
 	vkof::pipeline_destroy(pl);

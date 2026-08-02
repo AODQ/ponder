@@ -102,7 +102,7 @@ std::vector<SigmaPoint> run_subsurface_albedo_to_sigma(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_albedo_to_sigma.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_albedo_to_sigma.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -39,11 +39,11 @@ ponder::EnvironmentIbl ponder::environment_ibl_create() {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR, MOR_INCLUDE_DIR };
 	ibl.specularPipeline = vkof::pipeline_compute_create({
-		.pathCompute = PONDER_SHADER_DIR "env-prefilter-specular.comp",
+		.pathCompute = PONDER_SHADER_DIR "env-prefilter-specular.slang",
 		.includePaths = srat::slice { includePaths, 2u },
 	});
 	ibl.irradiancePipeline = vkof::pipeline_compute_create({
-		.pathCompute = PONDER_SHADER_DIR "env-prefilter-irradiance.comp",
+		.pathCompute = PONDER_SHADER_DIR "env-prefilter-irradiance.slang",
 		.includePaths = srat::slice { includePaths, 2u },
 	});
 

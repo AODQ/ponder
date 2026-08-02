@@ -12,6 +12,7 @@
 
 // declared in util.hpp; read by test-furnace-model-render.cpp's sweep case
 bool test::furnaceSweepEnabled = false;
+bool test::thoroughEnabled = false;
 
 extern "C" const char * __asan_default_options() {
 	return "protect_shadow_gap=0:fast_unwind_on_malloc=0";
@@ -64,6 +65,8 @@ int main(int argc, char ** argv) {
 			timed = true;
 		} else if (std::strcmp(argv[i], "--furnace") == 0) {
 			test::furnaceSweepEnabled = true;
+		} else if (std::strcmp(argv[i], "--thorough") == 0) {
+			test::thoroughEnabled = true;
 		} else {
 			filtered.push_back(argv[i]);
 		}

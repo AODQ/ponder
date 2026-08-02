@@ -1,0 +1,4 @@
+[vkof] vkCreateInstance(): Shader Validation was explicitly turned off, but the SPIR-V still needs to be stored, but not validated, in order for GPU-AV/DebugPrintf to get information from the original SPIR-V.
+[vkof] vkCreateDevice(): Warning that validation is adjusting settings:
+	Adding a VkPhysicalDevice16BitStorageFeatures to pNext with storageBuffer16BitAccess set to VK_TRUE
+

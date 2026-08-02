@@ -1,6 +1,6 @@
 {
 	"modelPaths": [
-		"assets/Models/",
+		"assets/models-categorized/",
 		"/home/toad/Downloads/models/"
 	],
 	"environmentMapPaths": [

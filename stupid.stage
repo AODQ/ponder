@@ -55,7 +55,7 @@
         {
             "type": "gltf",
             "name": "BrainStem",
-            "path": "/home/toad/repo/ponder/assets/Models/BrainStem/glTF/BrainStem.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-core/BrainStem.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -116,7 +116,7 @@
         {
             "type": "gltf",
             "name": "CarConcept",
-            "path": "/home/toad/repo/ponder/assets/Models/CarConcept/glTF/CarConcept.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/CarConcept.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -141,7 +141,7 @@
         {
             "type": "gltf",
             "name": "CesiumMilkTruck",
-            "path": "/home/toad/repo/ponder/assets/Models/CesiumMilkTruck/glTF-Binary/CesiumMilkTruck.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-core/CesiumMilkTruck.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -166,7 +166,7 @@
         {
             "type": "gltf",
             "name": "Duck",
-            "path": "/home/toad/repo/ponder/assets/Models/Duck/glTF/Duck.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-core/Duck.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -191,7 +191,7 @@
         {
             "type": "gltf",
             "name": "FlightHelmet",
-            "path": "/home/toad/repo/ponder/assets/Models/FlightHelmet/glTF/FlightHelmet.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/production-scene/FlightHelmet/FlightHelmet.gltf",
             "visible": true,
             "transform": {
                 "position": [
@@ -216,7 +216,7 @@
         {
             "type": "gltf",
             "name": "GlamVelvetSofa",
-            "path": "/home/toad/repo/ponder/assets/Models/GlamVelvetSofa/glTF/GlamVelvetSofa.gltf",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-sheen/GlamVelvetSofa.glb",
             "visible": true,
             "transform": {
                 "position": [
@@ -271,7 +271,7 @@
         {
             "type": "gltf",
             "name": "IridescenceAbalone",
-            "path": "/home/toad/repo/ponder/assets/Models/IridescenceAbalone/glTF-Binary/IridescenceAbalone.glb",
+            "path": "/home/toad/repo/ponder/assets/models-categorized/test-iridescence/IridescenceAbalone.glb",
             "visible": true,
             "transform": {
                 "position": [

@@ -1,0 +1,6 @@
+{
+  "GpuFlatIndexBuffer": "u32",
+  "GpuFlatMeshletBuffer": "u32",
+  "GpuResolveModelIndirectBuffer": "GpuResolveModelIndirect",
+  "GpuBluenoiseHandleBuffer": "u32"
+}

@@ -23,7 +23,7 @@ std::vector<f32> evaluate_directional_albedo(std::vector<f32v4> const & samples)
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "directional_albedo_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/directional_albedo_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -65,7 +65,7 @@ std::vector<f32v2> evaluate_directional_albedo_crosscheck(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "directional_albedo_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/directional_albedo_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -107,7 +107,7 @@ CompensateAlbedo evaluate_energy_compensate(std::vector<f32v3> const & samples) 
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "energy_compensate_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/energy_compensate_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -158,7 +158,7 @@ std::vector<f32> evaluate_kulla_conty_table(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "kulla_conty_table_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/kulla_conty_table_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -202,7 +202,7 @@ std::vector<f32v2> evaluate_kulla_conty_vs_analytic(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "kulla_conty_vs_analytic.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/kulla_conty_vs_analytic.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -248,7 +248,7 @@ std::vector<f32> evaluate_ess_integral(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ess_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ess_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

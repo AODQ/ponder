@@ -1,4 +1,3 @@
-// ponder viewer, offline reference path tracer
 // TODO move stage editor completely to its own library
 
 #include <vkof/vkof.hpp>
@@ -12,26 +11,34 @@
 #include <ponder/asset-browser.hpp>
 #include <ponder/bluenoise.hpp>
 #include <ponder/camera-controller.hpp>
+#include <ponder/debug-path.hpp>
+#include <ponder/dlss-rr.hpp>
+#include <ponder/regir-debug.hpp>
 #include <ponder/energy-tables.hpp>
 #include <ponder/environment-tables.hpp>
 #include <ponder/material-inspector.hpp>
+#include <ponder/material-media.hpp>
+#include <ponder/timeline.hpp>
 #include <ponder/vdb.hpp>
+#include <ponder/wavefront.hpp>
 #include <ponder/zeltner-tables.hpp>
 
 #include <stage/stage.hpp>
 
 #include "scene-state.hpp"
 
-// cpu-side reads of the loaded grid blob (world bbox for camera framing)
 #include <nanovdb/NanoVDB.h>
 
 #include "shaders/resolve_pc.h"
 #include "shaders/pt-accumulate-pc.h"
 #include "shaders/nan-check-pc.h"
+#include "shaders/manifold-probe-pc.h"
+#include "shaders/manifold-shade-pc.h"
 #include "shaders/pt-denoise-pc.h"
 #include "shaders/bloom-extract-pc.h"
 #include "shaders/bloom-blur-pc.h"
 #include "shaders/bloom-composite-pc.h"
+#include "shaders/display-dither-pc.h"
 
 #include <imgui.h>
 #define GLFW_INCLUDE_VULKAN
@@ -49,9 +56,7 @@
 
 namespace {
 
-// mirrors util-environment-map.glsl's EnvironmentMapHandles layout exactly;
-// GpuGlobalExtended.envMap (global_pc.h) is a VA into a buffer holding one
-// of these, uploaded once alongside ponder::EnvironmentTables
+// mirrors util-environment-map.glsl's EnvironmentMapHandles layout
 struct GpuEnvironmentMapHandles {
 	u32 radiance;
 	u32 pdf;
@@ -59,9 +64,6 @@ struct GpuEnvironmentMapHandles {
 	u32 aliasIndex;
 };
 
-// internal render resolution presets for the imgui dropdown; the scene
-// renders at this size regardless of the window size (the finalImage blit
-// scales to the swapchain)
 struct RenderResPreset {
 	char const * label;
 	u32 w;
@@ -76,50 +78,37 @@ constexpr RenderResPreset skRenderResPresets[] = {
 	{ "4320p", 7680u, 4320u },
 };
 
-// TODO mode this to its own ponder library so it can be used with observer
 struct ViewerArgs {
 	char const * gltfPath = nullptr;
 	char const * screenshotPath = nullptr;
 	char const * vdbPath = nullptr;
 	u32 width = 1280u;
 	u32 height = 720u;
-	// accumulation frames rendered before a --screenshot is taken
 	u32 spp = 256u;
+	// paths per pass, 0 for the ui's default
+	u32 pathBudget = 0u;
+	bool regir = false;
 	bool cameraOverride = false;
 	f32 cameraAzimuth = 0.0f;
 	f32 cameraElevation = 0.3f;
 	f32 cameraDistance = 0.0f;
 	f32 cameraFovY = 1.0f;
 	f32 envIntensity = 1.0f;
-	// ENV_MODE_* in environment.glsl: 0=furnace, 1=checkerboard, 2=black,
-	// 3=hdrmap
+	f32 backgroundIntensity = 1.0f;
 	i32 envMode = 0;
-	// true once --env-mode is explicitly passed, so --env-exr's
-	// auto-select-hdrmap default knows not to override it
 	bool envModeExplicit = false;
 	char const * envExrPath = nullptr;
-	// env-map next-event estimation default; see --env-mis
 	bool envMis = true;
-	// <= 0 disables; see --firefly-clamp
-	f32 fireflyClampLuminance = 20.0f;
-	// > 0 starts with the frame budget enabled at this target; mainly for
-	// exercising the tiled dispatch path headless, where there is no imgui
-	// toggle (a budgeted --screenshot accumulates fewer samples per pixel
-	// than --spp names, since each frame only refreshes a tile window)
+	bool meshMis = true;
+	bool manifoldNee = false;
+	f32 fireflyClampLuminance = 0.0f;
 	f32 budgetMs = 0.0f;
-	// vulkan validation layers (debug_printf capture, validation_message --
-	// see vkof::init) off by default: meaningful chunk of windowed startup
-	// time most interactive use doesn't need. headless (--screenshot)
-	// always has it on regardless, since the numeric tests depend on it.
-	// the material inspector probe no longer needs this -- see
-	// GpuProbeResult, a plain host-readable buffer instead of debug_printf
+	f32 generatedNormalStrength = 0.0f;
 	bool debug = false;
-	// starts in stage edit mode with this file loaded, bypassing the
-	// gltf/vdb-required startup gate entirely; mutually exclusive with
-	// newStage below (parse_args rejects both)
 	char const * stagePath = nullptr;
-	// starts in stage edit mode with a fresh, empty, unsaved stage
 	bool newStage = false;
+	bool dlssRr = false;
+	ponder::DlssRrQuality dlssRrQuality = ponder::DlssRrQuality::Dlaa;
 };
 
 void print_usage() {
@@ -129,17 +118,27 @@ void print_usage() {
 		"  [--camera <azimuth,elevation,distance,fovY>]  orbit camera\n"
 		"      (radians / world units; distance 0 = auto-fit)\n"
 		"  [--resolution <w>x<h>]  render resolution (default 1280x720)\n"
-		"  [--spp <n>]  accumulation frames before --screenshot (default 256)\n"
+		"  [--spp <n>]  samples per pixel before --screenshot (default 256)\n"
+		"  [--render-resolution <w>x<h>]  paths traced per pass; passes walk\n"
+		"      the image when it has more pixels (default 854x480)\n"
 		"  [--vdb <path.vdb>]  load a density grid\n"
 		"  [--env-intensity <f>]  environment radiance (default 1.0)\n"
+		"  [--background-intensity <f>]  scales the environment camera rays\n"
+		"      see directly; lighting is unchanged (default 1.0)\n"
 		"  [--env-mode <furnace|checkerboard|black|hdrmap>]  (default furnace)\n"
 		"  [--env-exr <path.exr>]  load an exr environment map; implies\n"
 		"      --env-mode hdrmap unless --env-mode is also given\n"
 		"  [--env-mis <0|1>]  env map next-event estimation (default 1)\n"
-		"  [--firefly-clamp <f>]  cap a sample's luminance before it's\n"
-		"      written out; <= 0 disables (default 20.0)\n"
+		"  [--mesh-mis <0|1>] emissive-mesh next-event estimation (default 1)\n"
+		"  [--regir]  enable regir many-light sampling\n"
+		"  [--manifold-nee <0|1>] nee through refracting casters (default 0)\n"
+		"  [--firefly-clamp <f>]  cap a sample's luminance after exposure\n"
+		"      before it's written out; <= 0 disables (default off)\n"
 		"  [--budget-ms <f>]  start with the resolve frame budget enabled\n"
 		"      at this gpu-ms target; <= 0 disables (default off)\n"
+		"  [--gen-normals <f>]  for materials with no normal map, synthesize\n"
+		"      one from base color luminance at this strength; fabricated\n"
+		"      relief, not real height data (default 0, off)\n"
 		"  [--debug]  enable vulkan validation layers (slower startup;\n"
 		"      needed for NaN probes / validation messages -- always on\n"
 		"      with --screenshot)\n"
@@ -147,6 +146,10 @@ void print_usage() {
 		"      loaded (skips the gltf/vdb-required startup check)\n"
 		"  [--new-stage]  start in stage edit mode with a fresh, empty,\n"
 		"      unsaved stage\n"
+		"  [--dlss-rr]  with --screenshot: --spp frames through DLSS ray\n"
+		"      reconstruction instead of accumulation\n"
+		"  [--dlss-rr-upscale <dlaa|quality|balanced|performance|ultra>]\n"
+		"      trace below the resolution and let RR upscale (default dlaa)\n"
 	);
 }
 
@@ -175,10 +178,23 @@ bool parse_args(i32 const argc, char const * const * const argv, ViewerArgs & ou
 			}
 			out.width = w;
 			out.height = h;
+		} else if (
+			strcmp(argv[i], "--render-resolution") == 0 && i + 1 < argc
+		) {
+			u32 w, h;
+			if (sscanf(argv[++i], "%ux%u", &w, &h) != 2 || w == 0u || h == 0u) {
+				printf("--render-resolution expects <w>x<h>\n");
+				return false;
+			}
+			out.pathBudget = w * h;
 		} else if (strcmp(argv[i], "--spp") == 0 && i + 1 < argc) {
 			out.spp = (u32)atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--env-intensity") == 0 && i + 1 < argc) {
 			out.envIntensity = (f32)atof(argv[++i]);
+		} else if (
+			strcmp(argv[i], "--background-intensity") == 0 && i + 1 < argc
+		) {
+			out.backgroundIntensity = (f32)atof(argv[++i]);
 		} else if (strcmp(argv[i], "--vdb") == 0 && i+1 < argc) {
 			out.vdbPath = argv[++i];
 		} else if (strcmp(argv[i], "--env-mode") == 0 && i + 1 < argc) {
@@ -202,14 +218,42 @@ bool parse_args(i32 const argc, char const * const * const argv, ViewerArgs & ou
 			out.envExrPath = argv[++i];
 		} else if (strcmp(argv[i], "--env-mis") == 0 && i + 1 < argc) {
 			out.envMis = atoi(argv[++i]) != 0;
+		}
+		else if (strcmp(argv[i], "--mesh-mis") == 0 && i + 1 < argc) {
+			out.meshMis = atoi(argv[++i]) != 0;
+		} else if (strcmp(argv[i], "--manifold-nee") == 0 && i + 1 < argc) {
+			out.manifoldNee = atoi(argv[++i]) != 0;
 		} else if (strcmp(argv[i], "--firefly-clamp") == 0 && i + 1 < argc) {
 			out.fireflyClampLuminance = (f32)atof(argv[++i]);
 		} else if (strcmp(argv[i], "--budget-ms") == 0 && i + 1 < argc) {
 			out.budgetMs = (f32)atof(argv[++i]);
+		} else if (strcmp(argv[i], "--gen-normals") == 0 && i + 1 < argc) {
+			out.generatedNormalStrength = (f32)atof(argv[++i]);
 		} else if (strcmp(argv[i], "--debug") == 0) {
 			out.debug = true;
 		} else if (strcmp(argv[i], "--stage") == 0 && i + 1 < argc) {
 			out.stagePath = argv[++i];
+		} else if (strcmp(argv[i], "--regir") == 0) {
+			out.regir = true;
+		} else if (strcmp(argv[i], "--dlss-rr") == 0) {
+			out.dlssRr = true;
+		} else if (strcmp(argv[i], "--dlss-rr-upscale") == 0 && i + 1 < argc) {
+			char const * const mode = argv[++i];
+			using ponder::DlssRrQuality;
+			if (strcmp(mode, "dlaa") == 0) {
+				out.dlssRrQuality = DlssRrQuality::Dlaa;
+			} else if (strcmp(mode, "quality") == 0) {
+				out.dlssRrQuality = DlssRrQuality::Quality;
+			} else if (strcmp(mode, "balanced") == 0) {
+				out.dlssRrQuality = DlssRrQuality::Balanced;
+			} else if (strcmp(mode, "performance") == 0) {
+				out.dlssRrQuality = DlssRrQuality::Performance;
+			} else if (strcmp(mode, "ultra") == 0) {
+				out.dlssRrQuality = DlssRrQuality::UltraPerformance;
+			} else {
+				printf("unknown --dlss-rr-upscale '%s'\n", mode);
+				return false;
+			}
 		} else if (strcmp(argv[i], "--new-stage") == 0) {
 			out.newStage = true;
 		} else if (argv[i][0] == '-') {
@@ -223,12 +267,6 @@ bool parse_args(i32 const argc, char const * const * const argv, ViewerArgs & ou
 		printf("--stage and --new-stage are mutually exclusive\n");
 		return false;
 	}
-	// windowed mode can fall back to the settings.json model library, but a
-	// headless screenshot needs to know exactly what to render -- a model,
-	// a vdb volume alone, or a --stage file (fully self-describing, so
-	// there's nothing to interactively edit -- just render it). --new-stage
-	// has none of the three (an empty, unsaved stage needs a window to
-	// build anything in), so it's the one case still rejected here
 	if (
 		out.screenshotPath != nullptr
 		&& out.gltfPath == nullptr
@@ -243,24 +281,11 @@ bool parse_args(i32 const argc, char const * const * const argv, ViewerArgs & ou
 	return true;
 }
 
-// everything derived from one loaded model, torn down wholesale on a model
-// switch -- nothing scene-related survives a load (per-frame staging
-// buffers included), so no stale state can leak between models
 ponder::Vdb sVdb {};
-// optional second grid, loaded alongside sVdb when the file has one named
-// "temperature" -- blackbody emission source, see util-blackbody.glsl.
-// gpuBuffer.id == 0 means none loaded (a file without one, or none open)
 ponder::Vdb sVdbTemperature {};
 
-// loads path's "temperature"-named grid into sVdbTemperature if present,
-// leaving it default-constructed (gpuBuffer.id == 0, emission disabled)
-// otherwise -- most vdb files (e.g. a plain cloud/fog scan) have no
-// temperature channel at all, so this is expected to no-op often
 void fnLoadVdbTemperatureIfPresent(char const * const path) {
 	sVdbTemperature = {};
-	// called independent of whether the file's density grid loaded, so (like
-	// the reload path's own density vdb_load) a bad/unreadable path must not
-	// throw uncaught here
 	try {
 		for (std::string const & name : ponder::vdb_grid_names(path)) {
 			if (name == "temperature") {
@@ -276,25 +301,15 @@ void fnLoadVdbTemperatureIfPresent(char const * const path) {
 }
 
 // -----------------------------------------------------------------------------
-// -- stage mode: multi-instance rendering backed by a stage::Stage
+// -- stage mode
 // -----------------------------------------------------------------------------
 
-// the viewer is either looking at a single loaded file (today's behavior,
-// no editing) or authoring/viewing a stage (multiple instances, imgui
-// outliner + gizmo, save-back) -- entered only via new/open stage, exited
-// via unload stage. see project discussion: editing is gated to stage mode
-// entirely, not just saving
 enum class ViewerMode { FileView, StageEdit };
 
-// mirrors GpuGlobalExtended.frameMode. camera drags render View (cheap
-// unlit preview) every moved frame; after skCameraIdleSeconds of no
-// movement, one Clear frame hard-zeros accumulation, then PathTrace resumes
 enum class FrameMode : i32 { View = 0, Clear = 1, PathTrace = 2 };
 
 constexpr f32 skCameraIdleSeconds = 0.2f;
 
-// world-bbox center/extent of a loaded grid, for camera framing when there
-// is no mesh to derive bounds from
 void vdb_bounds(
 	ponder::Vdb const & vdb, f32v3 & outCenter, f32 & outExtent
 ) {
@@ -348,10 +363,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	ponder::ZeltnerTables const zeltnerTables = ponder::zeltner_tables_create();
 	ponder::Bluenoise const bluenoise = ponder::bluenoise_create(PONDER_ASSET_DIR);
 
-	// -- environment map (optional). envMapHandlesBuffer holds one
-	// GpuEnvironmentMapHandles, re-uploaded on every load (--env-exr at
-	// startup, or the imgui exr picker at runtime) --
-	// GpuGlobalExtended.envMap is its VA whenever a map is resident
+	// -- environment map
 	ponder::EnvironmentTables sEnvTables {};
 	std::string sCurrentEnvMapPath;
 	vkof::Buffer const envMapHandlesBuffer = vkof::buffer_create({
@@ -362,7 +374,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		vkof::buffer_virtual_address(envMapHandlesBuffer)
 	);
 	auto const fnLoadEnvMap = [&](std::string const & path) -> bool {
-		// in-flight frames may still reference the outgoing tables' images
+		// care for in-flight frames
 		vkof::device_wait_idle();
 		if (sEnvTables.width != 0u) {
 			ponder::environment_tables_destroy(sEnvTables);
@@ -371,7 +383,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		sCurrentEnvMapPath.clear();
 		sEnvTables = ponder::environment_tables_create(path);
 		if (sEnvTables.width == 0u) {
-			// load failed (already warned by environment_tables_create)
 			return false;
 		}
 		GpuEnvironmentMapHandles const handles = {
@@ -393,7 +404,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		&& !fnLoadEnvMap(args.envExrPath)
 		&& args.envMode == 3
 	) {
-		// fall back rather than rendering hdrmap with no data behind it
 		args.envMode = 0;
 	}
 
@@ -402,16 +412,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		PONDER_SHADER_DIR,
 		MOR_INCLUDE_DIR,
 	};
-	vkof::Pipeline const resolvePipeline = (
-		vkof::pipeline_compute_create({
-			.pathCompute = (appDir / "shaders/resolve.comp").string().c_str(),
-			.includePaths = srat::slice { includePaths, 2u },
-		})
-	);
+	ponder::Wavefront wavefront = ponder::wavefront_create();
+	ponder::Regir regir = ponder::regir_create();
 	vkof::Pipeline const ptAccumulatePipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/pt-accumulate.comp").string().c_str()
+				(appDir / "shaders/pt-accumulate.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
@@ -419,7 +425,23 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const nanCheckPipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/nan-check.comp").string().c_str()
+				(appDir / "shaders/nan-check.slang").string().c_str()
+			),
+			.includePaths = srat::slice { includePaths, 2u },
+		})
+	);
+	vkof::Pipeline const manifoldProbePipeline = (
+		vkof::pipeline_compute_create({
+			.pathCompute = (
+				(appDir / "shaders/manifold-probe.slang").string().c_str()
+			),
+			.includePaths = srat::slice { includePaths, 2u },
+		})
+	);
+	vkof::Pipeline const manifoldShadePipeline = (
+		vkof::pipeline_compute_create({
+			.pathCompute = (
+				(appDir / "shaders/manifold-shade.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
@@ -427,7 +449,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const denoisePipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/pt-denoise.comp").string().c_str()
+				(appDir / "shaders/pt-denoise.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
@@ -435,7 +457,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const bloomExtractPipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/bloom-extract.comp").string().c_str()
+				(appDir / "shaders/bloom-extract.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
@@ -443,7 +465,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const bloomBlurPipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/bloom-blur.comp").string().c_str()
+				(appDir / "shaders/bloom-blur.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
@@ -451,21 +473,46 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::Pipeline const bloomCompositePipeline = (
 		vkof::pipeline_compute_create({
 			.pathCompute = (
-				(appDir / "shaders/bloom-composite.comp").string().c_str()
+				(appDir / "shaders/bloom-composite.slang").string().c_str()
+			),
+			.includePaths = srat::slice { includePaths, 2u },
+		})
+	);
+	vkof::Pipeline const displayDitherPipeline = (
+		vkof::pipeline_compute_create({
+			.pathCompute = (
+				(appDir / "shaders/display-dither.slang").string().c_str()
 			),
 			.includePaths = srat::slice { includePaths, 2u },
 		})
 	);
 
-	// -- broken-pixel counters fed by nan-check.comp; host-visible so the
-	// imgui panel reads them straight off the mapping (a frame stale, and
-	// the reset below can race in-flight atomics -- both fine for a debug
-	// display). [0] NaN pixels, [1] Inf pixels, cumulative since the last
-	// accumulation reset
+	// -- broken-pixel counters
 	vkof::Buffer const nanCountsBuffer = vkof::buffer_create({
 		.byteCount = 2u * sizeof(u32),
 		.memory = vkof::BufferMemory::HostWritable,
 	});
+	// -- manifold probe counts
+	vkof::Buffer const manifoldCountsBuffer = vkof::buffer_create({
+		.byteCount = 4u * sizeof(u32),
+		.memory = vkof::BufferMemory::HostWritable,
+	});
+	auto const fnZeroManifoldCounts = [&]() {
+		u32 const zero[4] = { 0u, 0u, 0u, 0u };
+		vkof::buffer_upload({
+			.buffer = manifoldCountsBuffer,
+			.byteOffset = 0u,
+			.data = srat::slice<u8 const>(
+				reinterpret_cast<u8 const *>(zero), sizeof(zero)
+			),
+		});
+	};
+	fnZeroManifoldCounts();
+	vkof::Buffer const manifoldCasterBuffer = vkof::buffer_create({
+		.byteCount = sizeof(GpuManifoldMeshData),
+		.memory = vkof::BufferMemory::HostWritable,
+	});
+
 	auto const fnZeroNanCounts = [&]() {
 		u32 const zero[2] = { 0u, 0u };
 		vkof::buffer_upload({
@@ -478,10 +525,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	};
 	fnZeroNanCounts();
 
-	// -- single u32 atomic counter backing util-nan-probe.glsl's
-	// NAN_PROBE_LIMIT_PER_FRAME gate; zeroed every frame (unlike
-	// nanCountsBuffer above, which accumulates across an accumulation run)
-	// so each frame gets its own fresh printf budget
+	// -- nan probe printf
 	vkof::Buffer const nanProbeCounterBuffer = vkof::buffer_create({
 		.byteCount = sizeof(u32),
 		.memory = vkof::BufferMemory::HostWritable,
@@ -498,13 +542,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	};
 	fnZeroNanProbeCounter();
 
-	// -- material inspector probe result: resolve.comp writes the hit's
-	// modelDrawIndex/materialIndex here (see GpuGlobalExtended.probeResult)
-	// when a right-click sets probePixel; a plain host-readable buffer
-	// rather than debug_printf, so it works without --debug/validation
-	// layers enabled. reset to the sentinel before every probe request so a
-	// stale leftover value from a previous click can't be mistaken for a
-	// fresh one
+	// -- material inspector probe result
 	vkof::Buffer const probeResultBuffer = vkof::buffer_create({
 		.byteCount = sizeof(GpuProbeResult),
 		.memory = vkof::BufferMemory::HostWritable,
@@ -519,14 +557,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	};
 	fnResetProbeResult();
 
-	// -- single u32 tallying COMPLETED PIXELS: pt-accumulate.comp atomicAdd's
-	// it once per pixel, on the frame that pixel's sample count crosses the
-	// max-spp target (so a finished render reads renderWidth * renderHeight).
-	// host-visible so the imgui progress bar reads it straight off the
-	// mapping (a frame or so stale, fine for a progress display). zeroed on
-	// every accumulation reset; lowering the target below what's already
-	// accumulated under-reads until the next reset (pixels only bump on the
-	// crossing frame)
+	// -- spp counter
 	vkof::Buffer const sppCounterBuffer = vkof::buffer_create({
 		.byteCount = sizeof(u32),
 		.memory = vkof::BufferMemory::HostWritable,
@@ -548,9 +579,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		);
 	};
 
-	// -- settings.json model + environment-map libraries at the repo root;
-	// rescanned on every model load so newly added files show up without a
-	// restart
+	// -- settings.json model + environment-map libraries
 	std::filesystem::path const settingsPath = (
 		appDir.parent_path().parent_path() / "settings.json"
 	);
@@ -566,6 +595,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		settingsPath, { "vdbPaths" }, { ".vdb" },
 		/*warnMissingKey=*/false
 	);
+	ponder::AssetTagIndex const sAssetTagIndex = ponder::asset_tag_index_load(
+		settingsPath.parent_path() / "assets" / "index.json"
+	);
+	auto sModelTagFilter = ponder::AssetTagFilter {
+		.index = &sAssetTagIndex, .selected = {}, .matchAny = false,
+	};
 
 	// -- vdb
 	std::string sCurrentVdbPath;
@@ -574,16 +609,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		if (sVdb.gpuBuffer.id != 0u) {
 			sCurrentVdbPath = args.vdbPath;
 		}
-		// independent of whether a "density"-named grid loaded above -- a
-		// fire-only vdb can have "temperature" with no density grid at all
 		fnLoadVdbTemperatureIfPresent(args.vdbPath);
 	}
 
-	// -- scene; only an explicit positional path loads anything. no
-	// auto-loading the model library's first entry -- windowed mode with no
-	// args just opens empty (headless still requires one of
-	// gltf/vdb/stage, enforced in parse_args above)
+	// -- scene
 	std::string sCurrentModelPath;
+	mor::scene_set_generated_normal_strength(args.generatedNormalStrength);
 	bool const startInStage = args.newStage || args.stagePath != nullptr;
 	if (args.gltfPath != nullptr) {
 		sCurrentModelPath = args.gltfPath;
@@ -594,23 +625,14 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	if (!sCurrentModelPath.empty() && sScene.blas.id == 0u) {
 		return 1;
 	}
-	// vdb-only: frame the camera to the grid's world bbox, since there is no
-	// mesh to derive bounds from
 	if (sCurrentModelPath.empty() && !sVdb.blob.empty()) {
 		vdb_bounds(sVdb, sScene.boundsCenter, sScene.boundsExtent);
 	}
 
-	// -- viewer mode: file view (today's single-model/single-vdb viewing, no
-	// editing) vs stage edit (multi-instance authoring backed by a
-	// stage::Stage, entered only via new/open stage). per-instance transform
-	// editing in stage mode goes through stage_imgui_gizmo_edit (imguizmo)
-	// instead of the drag-float sliders file view used to have -- those are
-	// gone entirely, not just hidden, since file view no longer edits
-	// anything
+	// -- viewer mode
 	ViewerMode sMode = ViewerMode::FileView;
 	stage::Stage sStage {};
 	StageRenderState sStageRender {};
-	// unsaved until the user explicitly saves; new stage starts empty here
 	char sStagePathBuffer[512] = {};
 
 	auto const fnActiveBoundsCenter = [&]() {
@@ -625,12 +647,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				? sStageRender.boundsExtent : sScene.boundsExtent
 		);
 	};
-	// re-frames the orbit camera to whichever mode is active; called on
-	// every mode switch and stage new/open/unload, mirroring what the old
-	// model-load/unload paths did inline against sScene. callers still need
-	// to follow up with ponder::camera_controller_sync_fp_from_orbit()
-	// themselves (camController declared later) to keep first-person in
-	// sync too
 	auto const fnReframeCamera = [&](srat::CameraOrbit & orbitCam) {
 		orbitCam.target = fnActiveBoundsCenter();
 		orbitCam.distance = fnActiveBoundsExtent() * 1.5f;
@@ -646,22 +662,54 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		.mipLevels = 1u,
 		.isDoubleBuffered = false,
 	});
+	// tonemapped display image; float so bloom's read-modify-write and the
+	// final dither see unquantized values
 	vkof::TransientImage const ptOutputTarget = vkof::transient_image_create({
-		.format = vkof::ImageFormat::r8g8b8a8_unorm,
+		.format = vkof::ImageFormat::r16g16b16a16_sfloat,
 		.scaleWidth = 1.0f,
 		.scaleHeight = 1.0f,
 		.mipLevels = 1u,
 		.isDoubleBuffered = false,
 	});
-	// internal render resolution; the imgui dropdown changes this at runtime
-	// (headless renders stay at the --resolution size)
+	// presented image: ptOutputTarget dithered in srgb-encoded space, stored
+	// linear; the blit to the srgb swapchain encodes and quantizes it
+	vkof::TransientImage const displayTarget = vkof::transient_image_create({
+		.format = vkof::ImageFormat::r16g16b16a16_sfloat,
+		.scaleWidth = 1.0f,
+		.scaleHeight = 1.0f,
+		.mipLevels = 1u,
+		.isDoubleBuffered = false,
+	});
 	u32 sRenderW = args.width;
 	u32 sRenderH = args.height;
+	// paths traced per pass; passes walk the image when it has more pixels
+	i32 sRenderBudgetIdx = 0;
+	// --render-resolution, until the ui picks a preset
+	u32 sPathBudgetOverride = args.pathBudget;
+	auto const fnPathBudgetWanted = [&]() -> u32 {
+		if (sPathBudgetOverride > 0u) { return sPathBudgetOverride; }
+		return (
+			skRenderResPresets[sRenderBudgetIdx].w
+			* skRenderResPresets[sRenderBudgetIdx].h
+		);
+	};
+	// the budget the path buffers hold
+	u32 sPathBudget = fnPathBudgetWanted();
+	// the size the wavefront traces; below the render size when dlss-rr upscales
+	auto sTraceSize = u32v2 { sRenderW, sRenderH };
 
-	// the accumulation buffer is a persistent image sized to the internal
-	// render resolution, so a resolution change recreates it
 	vkof::Image ptAccumImage {};
 	u32 ptAccumStorageHandle = 0u;
+	vkof::Sampler const magnifierSampler = (
+		vkof::sampler_create({
+			.magFilter = vkof::SamplerFilter::nearest,
+			.minFilter = vkof::SamplerFilter::nearest,
+			.addressModeU = vkof::SamplerAddressMode::clamp_to_edge,
+			.addressModeV = vkof::SamplerAddressMode::clamp_to_edge,
+			.addressModeW = vkof::SamplerAddressMode::clamp_to_edge,
+		})
+	);
+	ImTextureID ptAccumImguiId {};
 	auto const fnCreateAccumImage = [&]() {
 		ptAccumImage = vkof::image_create({
 			.width = sRenderW,
@@ -675,14 +723,15 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			.image = ptAccumImage,
 			.mipLevel = 0u,
 		});
+		if (ptAccumImguiId) {
+			vkof::image_imgui_id_destroy(ptAccumImguiId);
+			ptAccumImguiId = {};
+		}
+		sTraceSize = u32v2 { sRenderW, sRenderH };
+		ponder::wavefront_resize(wavefront, sRenderW, sRenderH, sPathBudget);
 	};
 	fnCreateAccumImage();
 
-	// g-buffer for pt-denoise.comp's edge-stopping weights: world-space hit
-	// position (w = hit flag) and geometric normal, refreshed every time
-	// resolve.comp resolves a tile (see resolve.comp's dedicated primary-ray
-	// trace). persistent + resolution-sized like the accum image above, so
-	// it follows the exact same create/resize/destroy lifecycle
 	vkof::Image gbufferPosImage {};
 	vkof::Image gbufferNorImage {};
 	vkof::Image gbufferAlbedoImage {};
@@ -729,10 +778,18 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	};
 	fnCreateGbufferImages();
 
-	// pt-denoise.comp's a-trous passes ping-pong between these two; the
-	// first pass reads ptAccumImage directly and the last pass writes
-	// straight to ptOutputTarget (see kDenoisePassCount below), so only
-	// intermediate passes need a home
+	vkof::Buffer manifoldBendPointBuffer {};
+	auto const fnCreateManifoldBendPoints = [&]() {
+		manifoldBendPointBuffer = vkof::buffer_create({
+			.byteCount = (
+				static_cast<u64>(sRenderW) * sRenderH
+				* sizeof(GpuManifoldBendPoint)
+			),
+			.memory = vkof::BufferMemory::DeviceOnly,
+		});
+	};
+	fnCreateManifoldBendPoints();
+
 	vkof::Image denoisePingImage {};
 	vkof::Image denoisePongImage {};
 	u32 denoisePingStorageHandle = 0u;
@@ -764,11 +821,24 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		});
 	};
 	fnCreateDenoiseImages();
-	bool sDenoiseEnabled = true;
+	bool sDenoiseEnabled = false;
 
-	// bloom: extract writes into bloomAImage, then blur passes ping-pong
-	// between bloomAImage/bloomBImage (bilinear sampler reads + storage
-	// writes), landing in whichever the last pass wrote
+	// -- dlss ray reconstruction, off at startup; created on first use
+	ponder::DlssRr sDlssRr {};
+	bool sDlssRrEnabled = false;
+	auto sDlssRrPreset = ponder::DlssRrPreset::Default;
+	auto sDlssRrQuality = args.dlssRrQuality;
+	if (args.dlssRr) {
+		if (ponder::dlss_rr_supported()) {
+			sDlssRrEnabled = true;
+		} else {
+			printf(
+				"--dlss-rr ignored: %s\n", ponder::dlss_rr_unsupported_reason()
+			);
+		}
+	}
+
+	// -- bloom
 	vkof::Sampler const bloomBlurSampler = vkof::sampler_create({
 		.magFilter = vkof::SamplerFilter::linear,
 		.minFilter = vkof::SamplerFilter::linear,
@@ -817,36 +887,35 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		});
 	};
 	fnCreateBloomImages();
-	bool sBloomEnabled = true;
+	bool sBloomEnabled = false;
 	f32 sBloomThreshold = 1.0f;
 	f32 sBloomIntensity = 0.12f;
 	constexpr u32 kBloomBlurPassCount = 5u;
 
-	// -- environment settings (imgui-editable in windowed mode)
+	// -- environment settings
 	f32 sEnvIntensity = args.envIntensity;
-	// backdrop-only scale on primary-ray misses (resolve.comp); the historic
-	// hard-coded 0.001 stays the default so the environment reads as distant
-	// from the scene geometry until deliberately raised
-	f32 sEnvBackgroundIntensity = 0.001f;
+	f32 sEnvBackgroundIntensity = args.backgroundIntensity;
 	i32 sEnvMode = args.envMode;
-	// next-event estimation toward the env map, mis-combined with the
-	// existing bsdf-sampled technique; strictly lower variance at equal
-	// sample count once correct, and a no-op for every env mode other than
-	// hdrmap, so on-by-default is safe
 	bool sEnvNeeEnabled = args.envMis;
-	// diagnostic: terminate every path after its first surface hit, so a
-	// grid of test spheres (different material params) can't cross-light
-	// each other -- see GpuGlobalExtended.envMapOnlyMode
-	bool sEnvMapOnlyMode = true;
+	bool sMeshNeeEnabled = args.meshMis;
+	bool sManifoldNeeEnabled = args.manifoldNee;
+	f32v3 sManifoldPointWo { 0.0f, 3.0f, 0.0f };
+	f32v3 sManifoldDebugColor { 0.0f, 0.4f, 0.8f };
+	bool sRegirEnabled = args.regir;
+	bool sRegirJitter = false;
+	u32 sRegirCellCount = 65536u;
+	f32 sRegirCellSize = 1.0f;
+	i32 sRegirMaxAge = 16;
+	// grid stats and probe inspector, the "regir" window
+	ponder::RegirDebugState sRegirDebug {};
+	auto const environment_light_power = [&]() -> f32 {
+		if (!sEnvNeeEnabled || sEnvMode != 3) {
+			return 0.0f;
+		}
+		return sEnvTables.luminanceIntegral * sEnvIntensity;
+	};
+	bool sEnvMapOnlyMode = false;
 	f32 sEnvRotation = 0.0f;
-	// applies sStage.environment onto the live (file-view-style) env state
-	// above -- called on new/open stage and --stage/--new-stage startup.
-	// there's no dedicated stage-side environment editor (see
-	// stage::Environment's comment): the "mode"/"exr map"/"env intensity"/
-	// "env rotation" controls further down are the only environment ui,
-	// shared by both modes, and get synced back into sStage.environment
-	// every frame while in stage mode (see the stageInstancesChanged/
-	// focusRequest handling below) so save picks up whatever's live
 	auto const fnApplyStageEnvironment = [&]() {
 		sEnvMode = (i32)sStage.environment.mode;
 		sEnvRotation = sStage.environment.rotationRadians;
@@ -855,76 +924,108 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			fnLoadEnvMap(sStage.environment.path);
 		}
 	};
-	// caps a sample's luminance before it's written out; not physically
-	// correct (loses a little energy from the clamped samples) but keeps
-	// the rare, very-high-variance paths ordinary nee/mis can't reach
-	// (e.g. a diffuse bounce that happens to hit a specular/glass object
-	// which then refracts to a bright light -- nee only helps at the
-	// vertex it's evaluated from, so it can't shortcut a caustic like
-	// that) from blowing out the image as fireflies
 	bool sFireflyClampEnabled = args.fireflyClampLuminance > 0.0f;
 	f32 sFireflyClampLuminance = (
 		args.fireflyClampLuminance > 0.0f ? args.fireflyClampLuminance : 20.0f
 	);
 	f32 sExposure = 1.0f;
 	bool sAntialias = true;
+	bool sSpectral = true;
+	bool sBlackholeEnabled = false;
+	f32v3 sBlackholeOri = { 0.0f, 0.0f, 0.0f };
+	// -- ambient medium
+	i32 sAmbientMediumType = (i32)ponder::WavefrontAmbientMediumType::None;
+	f32v3 sAmbientMediumScattering = { 1.0f, 1.0f, 1.0f };
+	f32v3 sAmbientMediumAbsorption = { 0.0f, 0.0f, 0.0f };
+	f32 sAmbientMediumDensity = 0.01f;
+	i32 sAmbientMediumPhase = (i32)ponder::WavefrontAmbientMediumPhase::HenyeyGreenstein;
+	f32 sAmbientMediumAnisotropy = 0.0f;
+	f32 sAmbientMediumDraineAlpha = 1.0f;
+	f32 sAmbientMediumDropletDiameter = 10.0f;
+	f32 sAmbientMediumHeightOrigin = 0.0f;
+	f32 sAmbientMediumHeightFalloff = 5.0f;
 
-	// -- vdb volume params (imgui-editable, "vdb" section); TODO should be
-	// per vdb-blob (see GpuGlobalExtended), global for now. sigmaAbsorption/
-	// sigmaScattering: see stage::VdbBlob's matching fields
+	// -- ground heating index field
+	bool sGroundHeatingEnabled = false;
+	f32 sGroundHeatingGroundHeight = 0.0f;
+	f32 sGroundHeatingHazeHeight = 1.0f;
+	f32 sGroundHeatingGradient = 0.0f;
+	f32 sGroundHeatingNoiseAmplitude = 0.0f;
+	f32 sGroundHeatingNoiseScale = 1.0f;
+
+	f32 sBlackholeMass = 0.0f;
+	f32 sBlackholeSpin = 0.9f;
+	f32 sBlackholeLensRadius = 1000.0f;
+	i32 sBlackholeMaxChords = 1024;
+	bool sBlackholeDiskEnabled = true;
+	f32 sBlackholeDiskInnerRadius = 6.0f;
+	f32 sBlackholeDiskOuterRadius = 20.0f;
+	f32 sBlackholeDiskTemperature = 6000.0f;
+	f32 sBlackholeDiskBrightness = 1.0f;
+	f32 sBlackholeDiskOpticalDepth = 5.0f;
+	f32 sBlackholeDiskOpticalDepthExponent = 1.5f;
+	f32 sBlackholeStepFactor = 0.05f;
+	// -- blackhole bullshit
+	double sBlackholeDiskSeconds = 0.0;
+	f32 sBlackholeDiskOrbitsPerSecond = 0.25f;
+	bool sBlackholeDiskAnimate = false;
+	bool sBlackholeDiskPrograde = true;
+	f32 sBlackholeDiskNoiseAmplitude = 0.3f;
+	f32 sBlackholeDiskNoiseScale = 4.0f;
+	f32 sBlackholeDiskHotspotRadius = 8.0f;
+	f32 sBlackholeDiskHotspotTemperature = 4000.0f;
+	f32 sBlackholeDiskHotspotSize = 1.0f;
+	// -- camera shutter
+	f32 sShutterSeconds = 0.0f;
+	// -- camera lens
+	f32 sLensRadius = 0.0f;
+	f32 sFocalDistance = 5.0f;
+	// lens edits outside the settings ui; resets the next frame
+	bool sLensChanged = false;
+	auto const fnBlackholeMetersPerSecond = [&]() -> double {
+		double const innerPeriod = (
+			2.0 * 3.14159265358979
+			* std::pow((double)sBlackholeDiskInnerRadius, 1.5)
+			* (double)sBlackholeMass
+		);
+		return (double)sBlackholeDiskOrbitsPerSecond * innerPeriod;
+	};
+	auto const fnBlackholeDiskTime = [&]() -> f32 {
+		double const innerPeriod = (
+			2.0 * 3.14159265358979
+			* std::pow((double)sBlackholeDiskInnerRadius, 1.5)
+			* (double)sBlackholeMass
+		);
+		double const orbits = (
+			std::fmod(
+				sBlackholeDiskSeconds * (double)sBlackholeDiskOrbitsPerSecond,
+				1000.0
+			)
+		);
+		return (f32)(orbits * innerPeriod);
+	};
+
+	// -- vdb volume
 	f32v3 sVdbSigmaAbsorption = { 0.0f, 0.0f, 0.0f };
 	f32v3 sVdbSigmaScattering = { 1.0f, 1.0f, 1.0f };
 	f32 sVdbDropletDiameter = 25.0f;
-	// manual HG anisotropy override; see stage::VdbBlob::phaseAnisotropyOverride
 	f32 sVdbPhaseAnisotropyOverride = -2.0f;
-	// blackbody temperature/emission scale; see stage::VdbBlob::
-	// temperatureScale/emissionScale and util-blackbody.glsl. only has any
-	// effect when sVdbTemperature is loaded (fnLoadVdbTemperatureIfPresent
-	// found a "temperature" grid)
 	f32 sVdbTemperatureScale = 1.0f;
 	f32 sVdbEmissionScale = 1.0f;
 
-	// -- homogeneous fog params (imgui-editable, "fog" section); see
-	// GpuGlobalExtended.fogThickness/fogAlbedo and
-	// util-vdb.glsl's homogeneous-fog section
+	// -- homogeneous fog params
 	bool sFogEnabled = false;
 	f32 sFogSigma = 0.1f;
 	f32v3 sFogAlbedo = { 1.0f, 1.0f, 1.0f };
-	// GpuGlobalExtended.fogDistanceMax: the fog's extent, so nee rays toward
-	// the env map aren't fully extinguished by an otherwise-unbounded
-	// medium; also caps the random-walk free-flight distance
 	f32 sFogDistanceMax = 1000.0f;
-	// 0 accumulates forever; > 0 freezes accumulation once every pixel holds
-	// that many samples (see fnRenderFrame's freeze path). raising it later
-	// resumes the same accumulation rather than restarting it
 	i32 sMaxSpp = 0;
-	// set by the imgui screenshot button, consumed right after the frame
-	// renders so the capture matches what's on screen
 	bool sScreenshotPending = false;
 	std::string sLastScreenshotPath;
 
-	// -- material inspector: right-click sets sProbePixel for the next
-	// upload/render; resolve.comp writes the hit's modelDrawIndex/
-	// materialIndex into probeResultBuffer (a plain buffer, not
-	// debug_printf -- see GpuProbeResult). (-1,-1) means no probe pending;
-	// fnUploadFrameState resets sProbePixel right after upload, so a probe
-	// only ever fires for the one frame right after a click
+	// -- material inspector
 	i32v2 sProbePixel { -1, -1 };
 	i32 sPickedMaterialIndex = -1;
-	// which stage instance the probe hit (file view is always 0, its only
-	// "instance"); resolves to a real stage::GltfInstance via
-	// sStageRender.modelDrawIndexToInstance
 	i32 sPickedModelDrawIndex = -1;
-	// the gpu is pipelined deeply enough that a given frame's probe-result
-	// write can surface well after the render_graph_execute call that
-	// submitted it returns -- reading probeResultBuffer live from the imgui
-	// block (which always runs before this iteration's own fnRenderFrame)
-	// would miss it essentially every time. copied out (into
-	// sPickedModelDrawIndex/sPickedMaterialIndex above, and this pending
-	// flag) immediately after fnRenderFrame instead, which gives the
-	// readback the largest possible window before the next probe request
-	// would overwrite it; the imgui block at the top of the next iteration
-	// is what actually opens the popup
 	bool sMaterialPopupPending = false;
 	std::vector<std::string> sProbeMessages;
 
@@ -947,10 +1048,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	srat::CameraFirstPerson & camFp = camController.firstPerson;
 	bool & sFirstPerson = camController.isFirstPerson;
 
-	// -- --stage / --new-stage: enter stage mode before the first frame,
-	// instead of requiring the user to click new/open in the imgui panel
-	// (which they'd otherwise never reach, since the gltf/vdb-required gate
-	// above is what's bypassed to get here)
+	// -- --stage / --new-stage
 	if (startInStage) {
 		sMode = ViewerMode::StageEdit;
 		if (args.stagePath != nullptr) {
@@ -963,23 +1061,111 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			);
 		}
 		stage_render_rebuild_blases(sStageRender, sStage);
-		stage_render_rebuild_tlas(sStageRender, sStage);
+		stage_render_rebuild_tlas(
+			sStageRender, sStage, sMeshNeeEnabled, environment_light_power()
+		);
 		fnApplyStageEnvironment();
 		fnReframeCamera(cam);
 		ponder::camera_controller_sync_fp_from_orbit(camController);
 	}
 
-	// headless stays at PathTrace the whole run
 	FrameMode sFrameMode = FrameMode::PathTrace;
 	f32 sViewIdleSeconds = 0.0f;
 
+	u32 sFrameIndex = 0u;
+
+	struct RegirBinding {
+		u64 guards;
+		u64 cells;
+		u64 reservoirs;
+		u32 cellCount;
+	};
+	auto const fnRegirBinding = [&]() -> RegirBinding {
+		bool const stageMode = sMode == ViewerMode::StageEdit;
+		vkof::Buffer const guards = (
+			stageMode
+				? sStageRender.regirGuardBuffer : sScene.regirGuardBuffer
+		);
+		vkof::Buffer const cells = (
+			stageMode ? sStageRender.regirCellBuffer : sScene.regirCellBuffer
+		);
+		vkof::Buffer const reservoirs = (
+			stageMode
+				? sStageRender.regirReservoirBuffer
+				: sScene.regirReservoirBuffer
+		);
+		if (guards.id == 0u) {
+			return RegirBinding { 0u, 0u, 0u, 0u };
+		}
+		return RegirBinding {
+			vkof::buffer_virtual_address(guards),
+			vkof::buffer_virtual_address(cells),
+			vkof::buffer_virtual_address(reservoirs),
+			stageMode ? sStageRender.regirCellCount : sScene.regirCellCount,
+		};
+	};
+
 	auto const fnUploadFrameState = [&]() {
-		// each frame gets a fresh NAN_PROBE_LIMIT_PER_FRAME budget
+		RegirBinding const regir = fnRegirBinding();
 		fnZeroNanProbeCounter();
-		// stage mode binds only the stage's first vdb instance's first blob
-		// -- see StageRenderState's comment on why -- and applies that
-		// instance's transform; file view's vdb has no instance transform of
-		// its own, so it always renders at the grid's native placement
+		if (sMode == ViewerMode::FileView) {
+			u64 const materialsVa = (
+				sScene.materialsOverride.id != 0u
+					? mor::scene_gpu_materials_va(sScene.materialsOverride)
+					: 0u
+			);
+			GpuResolveModelIndirect const modelDesc = {
+				.meshlets = sScene.bufs.meshlets,
+				.materials = (
+					materialsVa != 0u ? materialsVa : sScene.bufs.materials
+				),
+				.uvTransforms = sScene.bufs.uvTransforms,
+				.positions = sScene.bufs.positions,
+				.instances = sScene.bufs.instances,
+				.attributes = sScene.bufs.attributes,
+				.meshletVerts = sScene.bufs.meshletVerts,
+				.meshletTris = sScene.bufs.meshletTris,
+				.flatIndices = sScene.bufs.flatIndices,
+				.flatMeshlets = sScene.bufs.flatMeshlets,
+				.modelMatrix = f32m44_identity(),
+				.emitterLightOffset = 0u,
+				.emitterLightCount = 0u,
+			};
+			{
+				std::vector<GpuResolveModelIndirect> models { modelDesc };
+				std::vector<mor::Scene> const scenes { sScene.scene };
+				std::vector<mor::GpuMaterials> const overrides {
+					sScene.materialsOverride
+				};
+				std::vector<std::vector<mor::MeshletAreaInfo> const *> const
+					areas { &sScene.meshletAreas };
+				EmitterListRebuild const rebuilt = (
+					emitter_lights_rebuild(
+						models, scenes, overrides, areas, sMeshNeeEnabled,
+						environment_light_power(),
+						sScene.emitterLightsBuffer, sScene.emitterLightCapacity
+					)
+				);
+				sScene.emitterLightCount = rebuilt.count;
+				sScene.envLightIndex = rebuilt.envLightIndex;
+				if (rebuilt.clipped > 0u && rebuilt.clipped != sScene.emitterClipped) {
+					printf(
+						"[nee] emitter list clipped: %u emissive meshlets dropped,"
+						" %u kept. the dropped ones still render, by bsdf"
+						" sampling alone\n",
+						rebuilt.clipped, rebuilt.count
+					);
+				}
+				sScene.emitterClipped = rebuilt.clipped;
+				sScene.emitterBuildMs = rebuilt.buildMs;
+				vkof::buffer_upload({
+					.buffer = sScene.modelsIndirectBuffer,
+					.byteOffset = 0u,
+					.data = srat::slice_as_bytes(models[0]),
+				});
+			}
+		}
+
 		stage::VdbBlob const * const activeVdbBlob = (
 			sMode == ViewerMode::StageEdit
 				&& !sStage.vdbInstances.empty()
@@ -987,8 +1173,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					? &sStage.vdbInstances[0].blobs[0]
 					: nullptr
 		);
-		// blackbody emission: a second, optional blob named "temperature" in
-		// the same stage instance -- see stage::VdbBlob::emissionScale
 		stage::VdbBlob const * const activeVdbTemperatureBlob = (
 			[&]() -> stage::VdbBlob const * {
 				if (sMode != ViewerMode::StageEdit || sStage.vdbInstances.empty()) {
@@ -1034,16 +1218,51 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			.envMap = sEnvTables.width != 0u ? envMapHandlesVa : 0u,
 			.envRotation = sEnvRotation,
 			.envNeeEnabled = sEnvNeeEnabled ? 1u : 0u,
-			.envMapOnlyMode = sEnvMapOnlyMode ? 1u : 0u,
+			.emitterLights = (
+				sMode == ViewerMode::StageEdit
+					? (
+						sStageRender.emitterLightsBuffer.id != 0u
+							? vkof::buffer_virtual_address(
+								sStageRender.emitterLightsBuffer
+							)
+							: 0u
+					)
+					: (
+						sScene.emitterLightsBuffer.id != 0u
+							? vkof::buffer_virtual_address(
+								sScene.emitterLightsBuffer
+							)
+							: 0u
+					)
+			),
+			.emitterLightCount = (
+				sMode == ViewerMode::StageEdit
+					? sStageRender.emitterLightCount : sScene.emitterLightCount
+			),
+			.meshNeeEnabled = sMeshNeeEnabled ? 1u : 0u,
+			.manifoldNeeEnabled = sManifoldNeeEnabled ? 1u : 0u,
+			.envLightIndex = (
+				sMode == ViewerMode::StageEdit
+					? sStageRender.envLightIndex : sScene.envLightIndex
+			),
+			.emitterNeeDebug = 0u,
+			.regirGuards = regir.guards,
+			.regirCells = regir.cells,
+			.regirReservoirs = regir.reservoirs,
+			.regirCellCount = regir.cellCount,
+			.regirFrameIndex = sFrameIndex,
+			.regirCellSize = sRegirCellSize,
+			// the old pipeline's grid is no longer allocated; regir is new-core only
+			.regirEnabled = 0u,
+			.envMapOnlyDepth = (
+				sEnvMapOnlyMode ? 1u : (sFrameMode == FrameMode::View ? 2u : 0u)
+			),
 			.fireflyClampLuminance = (
 				sFireflyClampEnabled ? sFireflyClampLuminance : 0.0f
 			),
 			.envBackgroundIntensity = sEnvBackgroundIntensity,
 			.vdb = activeVdbHandleVa,
 			.vdbWorldToLocal = activeVdbWorldToLocal,
-			// stage mode's blob owns these directly (edited in
-			// stage_imgui_edit's blob inspector); file view keeps using its
-			// own global sliders
 			.vdbSigmaAbsorption = (
 				activeVdbBlob != nullptr
 					? activeVdbBlob->sigmaAbsorption : sVdbSigmaAbsorption
@@ -1089,8 +1308,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			.fogAlbedo = sFogAlbedo,
 			.fogDistanceMax = sFogDistanceMax,
 		};
-		// one-shot: consumed by this upload, so it doesn't keep firing
-		// resolve.comp's debugPrintfEXT on every subsequent frame
 		sProbePixel = { -1, -1 };
 		vkof::buffer_upload({
 			.buffer = (
@@ -1100,142 +1317,144 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			.byteOffset = 0u,
 			.data = srat::slice_as_bytes(extended),
 		});
-		// stage mode's modelsIndirectBuffer is n entries, kept current by
-		// stage_render_rebuild_tlas (called whenever an instance/transform
-		// changes, not every frame) -- only file view's single-entry buffer
-		// needs a per-frame upload here, and only because it always did;
-		// the model is always at identity now (file view has no transform
-		// editing left), so this is really just re-asserting the same
-		// unchanging descriptor every frame
-		if (sMode == ViewerMode::FileView) {
-			// falls back to the original, un-editable buffer for the (rare)
-			// zero-material model, since scene_gpu_materials_create never
-			// allocates a backing buffer in that case (va stays 0); the
-			// empty --vdb-only scene has no materialsOverride at all, and
-			// the va getter dereferences the handle unguarded
-			u64 const materialsVa = (
-				sScene.materialsOverride.id != 0u
-					? mor::scene_gpu_materials_va(sScene.materialsOverride)
-					: 0u
-			);
-			GpuResolveModelIndirect const modelDesc = {
-				.meshlets = sScene.bufs.meshlets,
-				.materials = (
-					materialsVa != 0u ? materialsVa : sScene.bufs.materials
-				),
-				.uvTransforms = sScene.bufs.uvTransforms,
-				.positions = sScene.bufs.positions,
-				.instances = sScene.bufs.instances,
-				.attributes = sScene.bufs.attributes,
-				.meshletVerts = sScene.bufs.meshletVerts,
-				.meshletTris = sScene.bufs.meshletTris,
-				.flatIndices = sScene.bufs.flatIndices,
-				.flatMeshlets = sScene.bufs.flatMeshlets,
-				.modelMatrix = f32m44_identity(),
-			};
-			vkof::buffer_upload({
-				.buffer = sScene.modelsIndirectBuffer,
-				.byteOffset = 0u,
-				.data = srat::slice_as_bytes(modelDesc),
-			});
-		}
 	};
 
-	u32 sFrameIndex = 0u;
 	u32 sAccumFrames = 0u;
+	ponder::Timeline sTimeline {};
+	ponder::DebugPathState sDebugPath {};
+	ponder::MaterialMedia sMaterialMedia {};
+	FrameMode sPreviousFrameMode = FrameMode::View;
 
-	// -- frame budget: instead of tracing the whole screen every frame,
-	// resolve dispatches a sliding window of kPtTileSize tiles sized so its
-	// measured gpu time tracks sBudgetTargetMs. accumulation is
-	// rate-independent (per-pixel mean + count), so tiles refreshing at
-	// different cadences converge correctly; the accumulate pass gates its
-	// mean-update on the window (see pt-accumulate.comp)
-	bool sBudgetEnabled = true; // always enabled
+	// -- frame budget
+	bool sBudgetEnabled = true;
 	f32 sBudgetTargetMs = args.budgetMs > 0.0f ? args.budgetMs : 8.0f;
-	// smoothed gpu cost of one tile; <= 0 until the first measurement lands
-	double sMsPerTileEma = 0.0;
-	u32 sTileCursor = 0u;
-	// smoothed window size in tiles (<= 0 until the controller runs);
-	// forced full-coverage frames (reset/probe/budget-off) bypass it so
-	// they don't yank the smoothed size around
-	double sTileKSmooth = 0.0;
-	// current window's tile count + how many frames it's been held for;
-	// the cursor only advances once sTileWindowFrames reaches sTileWindowSpp
-	u32 sTileWindowCount = 0u;
-	u32 sTileWindowFrames = 0u;
-	i32 sTileWindowSpp = 32;
-	// display-only: last dispatched window + its measured cost
-	u32 sTileKLast = 0u;
 	double sResolveMsLast = 0.0;
-	struct TileFrameHistory {
+	struct ResolveFrameHistory {
 		bool resolveRan;
-		u32 tileCount;
+		// wavefront steps [stepFirst, stepFirst + stepCount) the resolve node
+		// dispatched, on pathCount paths
+		u32 stepFirst;
+		u32 stepCount;
+		u32 pathCount;
+		// resolve's position in that frame's node list; the regir fill can
+		// precede it
+		u32 resolveNodeIndex;
 	};
-	// per vkof frame slot: what resolve dispatched the last time this slot
-	// was used. vkof's timestamp readback (node_gpu_ms) is for the previous
-	// use of the slot, i.e. kFramesInFlight (2) frames latent, so each
-	// measurement must pair with the window size from that frame, not the
-	// current one
-	TileFrameHistory sTileHistory[2] = {};
+	ResolveFrameHistory sResolveHistory[2] = {};
+	// gpu ms per million paths of each pass step, 0 until measured; steps
+	// differ a lot (bounce 0 trace + shade vs camera, output, late bounces)
+	double sStepCost[ponder::skWavefrontPassStepCount] = {};
 
-	// -- focus region: when active, the budget window above slides over
-	// just this sub-rect of the screen instead of the full grid, so all
-	// resolve work concentrates on a hard-to-converge area; pixels outside
-	// it stop accumulating and hold their current average (see
-	// pt-accumulate.comp's coverage test). stored normalized to [0,1] so it
-	// survives render-resolution switches, snapped outward to the
-	// kPtTileSize grid at use. set by right-click drag while sFocusMode is
-	// on (which repurposes the material-inspector probe button)
-	bool sFocusMode = false;
+	// -- wavefront pass accumulation
+	// counts accumulation resets; a pass accumulates only if it started
+	// after the latest reset
+	u32 sResetGeneration = 0u;
+	u32 sPassGeneration = 0u;
+	// generation of the accumulated passes, ~0 when none
+	u32 sAccumGeneration = ~0u;
+
+	// -- focus region
 	bool sFocusActive = false;
 	f32v2 sFocusMin { 0.0f, 0.0f };
 	f32v2 sFocusMax { 1.0f, 1.0f };
-	struct FocusTileBounds { u32 x0, y0, x1, y1; };
-	// tile-snapped inclusive bounds of the focus rect at the current render
-	// res; shared by the dispatch region and the ui overlay so what is
-	// outlined is exactly what gets dispatched. min == max collapses to one
-	// tile; the clamps keep a stale rect valid across resolution switches
-	auto const fnFocusTileBounds = [&](
-		u32 const gridW, u32 const gridH
-	) -> FocusTileBounds {
-		return FocusTileBounds {
-			.x0 = std::min(
-				(u32)(sFocusMin.x * (f32)sRenderW) / kPtTileSize, gridW - 1u
-			),
-			.y0 = std::min(
-				(u32)(sFocusMin.y * (f32)sRenderH) / kPtTileSize, gridH - 1u
-			),
-			.x1 = std::min(
-				(u32)(sFocusMax.x * (f32)sRenderW) / kPtTileSize, gridW - 1u
-			),
-			.y1 = std::min(
-				(u32)(sFocusMax.y * (f32)sRenderH) / kPtTileSize, gridH - 1u
-			),
+	// the focus rectangle in pixels, grown to whole wavefront tiles
+	auto const fnFocusRegion = [&]() -> ponder::WavefrontRegion {
+		u32 const tile = ponder::skWavefrontTileSize;
+		auto const fnAxis = [&](f32 const lo, f32 const hi, u32 const size) {
+			u32 const first = (
+				std::min((u32)(lo * (f32)size), size - 1u) / tile * tile
+			);
+			u32 const last = (
+				std::min(((u32)(hi * (f32)size) + tile - 1u) / tile * tile, size)
+			);
+			return u32v2 { first, std::max(last, first + 1u) - first };
+		};
+		u32v2 const x = fnAxis(sFocusMin.x, sFocusMax.x, sRenderW);
+		u32v2 const y = fnAxis(sFocusMin.y, sFocusMax.y, sRenderH);
+		return ponder::WavefrontRegion {
+			.origin = { x.x, y.x },
+			.extent = { x.y, y.y },
 		};
 	};
 
 	auto const fnRenderFrame = [&](
 		FrameMode const frameMode,
-		// only meaningful when frameMode == PathTrace -- View/Clear have
-		// their own dedicated full-screen behavior regardless of this
 		bool const pathTraceReset,
 		bool const freezeAccum,
-		bool const probeRequested
+		bool const probeRequested,
+		bool const rrReset
 	) {
-		// max-spp freeze: accumulation is capped, so the resolve and
-		// nan-check dispatches are skipped and the gpu goes mostly idle --
-		// the accumulate pass alone keeps re-outputting the frozen average,
-		// which keeps exposure/tonemap live. a pending material-inspector
-		// probe still needs one resolve dispatch to answer (the probe write
-		// lives in resolve.comp); its sample goes nowhere since accumulation
-		// stays frozen. View mode always resolves (that IS its whole job);
-		// Clear mode never does (pt-accumulate.comp hard-zeros without it)
-		bool const runResolve = (
+		bool const timelineSingleSample = (
+			!sTimeline.playing || (sBlackholeEnabled && sBlackholeDiskAnimate)
+		);
+		bool const accumReset = (
 			frameMode == FrameMode::View
+			|| (
+				frameMode == FrameMode::PathTrace
+				&& (
+					pathTraceReset
+					|| sPreviousFrameMode == FrameMode::Clear
+					|| timelineSingleSample
+				)
+			)
+		);
+		bool const regirView = sRegirEnabled && sRegirDebug.viewMode != 0;
+		// dlss ray reconstruction: one whole pass per frame, never accumulated
+		bool const rrActive = sDlssRrEnabled && !regirView;
+		bool const runResolve = (
+			rrActive
+			|| frameMode == FrameMode::View
 			|| (
 				frameMode == FrameMode::PathTrace && (!freezeAccum || probeRequested)
 			)
 		);
+
+		// -- path budget: dlss-rr takes every trace pixel each frame
+		u32v2 const traceSize = (
+			rrActive
+				? ponder::dlss_rr_render_size(
+					sDlssRrQuality, u32v2 { sRenderW, sRenderH }
+				)
+				: u32v2 { sRenderW, sRenderH }
+		);
+		// whole tiles: rr needs the full image every frame, and edge tiles'
+		// padding slots count against the budget
+		u32 const traceTilesW = (
+			(traceSize.x + ponder::skWavefrontTileSize - 1u)
+			/ ponder::skWavefrontTileSize
+		);
+		u32 const traceTilesH = (
+			(traceSize.y + ponder::skWavefrontTileSize - 1u)
+			/ ponder::skWavefrontTileSize
+		);
+		u32 const pathBudget = (
+			rrActive
+				? traceTilesW * traceTilesH * ponder::skWavefrontTileSlotCount
+				: fnPathBudgetWanted()
+		);
+		if (pathBudget != sPathBudget || traceSize != sTraceSize) {
+			sPathBudget = pathBudget;
+			sTraceSize = traceSize;
+			ponder::wavefront_resize(
+				wavefront, traceSize.x, traceSize.y, sPathBudget
+			);
+		}
+
+		// -- wavefront pass
+		// a debug capture records a whole pass, from its camera step
+		if (sDebugPath.capturePending || rrActive) {
+			ponder::wavefront_pass_restart(wavefront);
+		}
+		if (accumReset) {
+			++sResetGeneration;
+		}
+		bool const passStarts = (
+			runResolve && !regirView && wavefront.passStep == 0u
+		);
+		if (passStarts) {
+			sPassGeneration = sResetGeneration;
+		}
+
 		GpuGlobalPc const globalPC = {
 			.time = 0.0f,
 			.cameraPos = (
@@ -1259,10 +1478,163 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					? sStageRender.modelsIndirectBuffer
 					: sScene.modelsIndirectBuffer
 			),
-			.pad1 = 0u,
+			.pad1 = wavefront.globalVa,
 			.pad2 = 0u,
 			.pad3 = 0u,
 		};
+		ponder::WavefrontCamera const viewCamera = (
+			sFirstPerson
+				? ponder::WavefrontCamera {
+					.position = camFp.position,
+					.forward = srat::camera_fp_forward(camFp),
+					.fovY = camFp.fovY,
+				}
+				: ponder::WavefrontCamera {
+					.position = srat::camera_orbit_eye(cam),
+					.forward = cam.target - srat::camera_orbit_eye(cam),
+					.fovY = cam.fovY,
+				}
+		);
+		ponder::wavefront_global_update(
+			wavefront,
+			regir,
+			ponder::WavefrontGlobalInfo {
+				.camera = viewCamera,
+				.blackhole = ponder::WavefrontBlackhole {
+					.ori = sBlackholeOri,
+					.mass = sBlackholeEnabled ? sBlackholeMass : 0.0f,
+					.spin = sBlackholeSpin,
+					.lensRadius = sBlackholeLensRadius,
+					.maxChords = (u32)sBlackholeMaxChords,
+					.diskInnerRadius = sBlackholeDiskInnerRadius,
+					.diskOuterRadius = (
+						sBlackholeDiskEnabled ? sBlackholeDiskOuterRadius : 0.0f
+					),
+					.diskTemperature = sBlackholeDiskTemperature,
+					.diskBrightness = sBlackholeDiskBrightness,
+					.diskOpticalDepth = sBlackholeDiskOpticalDepth,
+					.diskOpticalDepthExponent = sBlackholeDiskOpticalDepthExponent,
+					.stepFactor = sBlackholeStepFactor,
+					.diskTime = fnBlackholeDiskTime(),
+					.diskRotation = sBlackholeDiskPrograde ? 1.0f : -1.0f,
+					.diskNoiseAmplitude = sBlackholeDiskNoiseAmplitude,
+					.diskNoiseScale = sBlackholeDiskNoiseScale,
+					.diskHotspotRadius = sBlackholeDiskHotspotRadius,
+					.diskHotspotTemperature = sBlackholeDiskHotspotTemperature,
+					.diskHotspotSize = sBlackholeDiskHotspotSize,
+				},
+				.ambientMedium = ponder::WavefrontAmbientMedium {
+					.type = (ponder::WavefrontAmbientMediumType)sAmbientMediumType,
+					.sigmaAbsorption = sAmbientMediumAbsorption * sAmbientMediumDensity,
+					.sigmaScattering = sAmbientMediumScattering * sAmbientMediumDensity,
+					.phase = (ponder::WavefrontAmbientMediumPhase)sAmbientMediumPhase,
+					.anisotropy = sAmbientMediumAnisotropy,
+					.draineAlpha = sAmbientMediumDraineAlpha,
+					.dropletDiameter = sAmbientMediumDropletDiameter,
+					.heightOrigin = sAmbientMediumHeightOrigin,
+					.heightFalloff = sAmbientMediumHeightFalloff,
+				},
+				.materialMediumTableVa = (
+					ponder::material_media_table_va(sMaterialMedia)
+				),
+				.materialMediumRecordsVa = (
+					ponder::material_media_records_va(sMaterialMedia)
+				),
+				.materialMediumModelCount = sMaterialMedia.modelCount,
+				.sceneEmitterLightsVa = (
+					sMode == ViewerMode::StageEdit
+						? (
+							sStageRender.emitterLightsBuffer.id != 0u
+								? vkof::buffer_virtual_address(
+									sStageRender.emitterLightsBuffer
+								)
+								: 0u
+						)
+						: (
+							sScene.emitterLightsBuffer.id != 0u
+								? vkof::buffer_virtual_address(
+									sScene.emitterLightsBuffer
+								)
+								: 0u
+						)
+				),
+				.sceneEmitterLightCount = (
+					sMode == ViewerMode::StageEdit
+						? sStageRender.emitterLightCount : sScene.emitterLightCount
+				),
+				.meshNeeEnabled = sMeshNeeEnabled,
+				.envNeeEnabled = sEnvNeeEnabled,
+				.environment = ponder::WavefrontEnvironment {
+					.mode = (
+						sEnvMode == 3 && sEnvTables.width == 0u
+						? ponder::WavefrontEnvironmentMode::Furnace
+						: (ponder::WavefrontEnvironmentMode)sEnvMode
+					),
+					.intensity = sEnvIntensity,
+					.rotation = sEnvRotation,
+					.radianceHandle = sEnvTables.radianceHandle,
+					.pdfHandle = sEnvTables.pdfHandle,
+					.aliasProbHandle = sEnvTables.aliasProbHandle,
+					.aliasIndexHandle = sEnvTables.aliasIndexHandle,
+					.emitterIndex = (
+						sMode == ViewerMode::StageEdit
+						? sStageRender.envLightIndex
+						: sScene.envLightIndex
+					),
+					.backgroundIntensity = sEnvBackgroundIntensity,
+				},
+				.groundHeating = ponder::WavefrontGroundHeating {
+					.enabled = sGroundHeatingEnabled,
+					.groundHeight = sGroundHeatingGroundHeight,
+					.hazeHeight = sGroundHeatingHazeHeight,
+					.gradient = sGroundHeatingGradient,
+					.noiseAmplitude = sGroundHeatingNoiseAmplitude,
+					.noiseScale = sGroundHeatingNoiseScale,
+				},
+				.regir = ponder::RegirSettings {
+					.enabled = sRegirEnabled,
+					.cellSize = sRegirCellSize,
+					// rr never advances the timeline; reseed every frame instead
+					.fillIndex = rrActive ? sFrameIndex : sTimeline.frame,
+					.maxAge = (u32)sRegirMaxAge,
+					// frame stays 0 while the camera moves and stops when paused.
+					// rr needs stable representatives; claiming a cell sets one
+					.refresh = (
+						!rrActive && sTimeline.playing && sTimeline.frame > 0u
+					),
+					.jitter = sRegirJitter || rrActive,
+				},
+				.modelsVa = vkof::buffer_virtual_address(
+					sMode == ViewerMode::StageEdit
+						? sStageRender.modelsIndirectBuffer
+						: sScene.modelsIndirectBuffer
+				),
+				.shutterOpen = 0.0f,
+				.shutterDuration = (
+					(f32)(sShutterSeconds * fnBlackholeMetersPerSecond())
+				),
+				.lensRadius = sLensRadius,
+				.focalDistance = sFocalDistance,
+				.frameIndex = sFrameIndex,
+				// rr needs fresh noise every frame, also while the timeline
+				// holds its frame
+				.sampleIndex = rrActive ? sFrameIndex : sTimeline.frame,
+				.width = traceSize.x,
+				.height = traceSize.y,
+				.region = (
+					sFocusActive && !probeRequested && !rrActive
+						? std::optional(fnFocusRegion())
+						: std::nullopt
+				),
+				.debugPath = sDebugPath.capturePending,
+				.debugPixel = sDebugPath.pixel,
+				.debugCamera = ponder::WavefrontCamera {
+					.position = sDebugPath.camera.position,
+					.forward = sDebugPath.camera.forward,
+					.fovY = sDebugPath.camera.fovY,
+				},
+			}
+		);
 
 		u32 const colorHandle = vkof::transient_image_storage_handle({
 			.image = colorTarget,
@@ -1273,249 +1645,307 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			.mipLevel = 0u,
 		});
 
-		// -- frame-budget window: which tiles resolve covers this frame,
-		// sliding over the active region -- the full screen, or the focus
-		// rect's tile-snapped sub-grid. a probe's pixel may be anywhere, so
-		// it forces the full screen; budget-off and a missing cost estimate
-		// merely force the whole region, which is exactly the focus payoff:
-		// a small region redispatched in full every frame. View/Clear are
-		// always full-screen by construction (see FrameMode's comment);
-		// pathTraceReset also forces it -- a partial window can't correctly
-		// reset pixels outside it (they'd silently keep blending onto stale
-		// data forever, not just until the window sweeps back), and unlike
-		// camera movement this is a one-off event, so paying for one
-		// full-screen frame here is cheap enough
-		u32 const tileGridW = (sRenderW + kPtTileSize - 1u) / kPtTileSize;
-		u32 const tileGridH = (sRenderH + kPtTileSize - 1u) / kPtTileSize;
-		bool const fullScreen = !sFocusActive || probeRequested;
-		u32 regionTileX = 0u;
-		u32 regionTileY = 0u;
-		u32 regionGridW = tileGridW;
-		u32 regionGridH = tileGridH;
-		if (!fullScreen) {
-			FocusTileBounds const b = fnFocusTileBounds(tileGridW, tileGridH);
-			regionTileX = b.x0;
-			regionTileY = b.y0;
-			regionGridW = b.x1 - b.x0 + 1u;
-			regionGridH = b.y1 - b.y0 + 1u;
-		}
-		u32 const tileTotal = regionGridW * regionGridH;
-		u32 tileFirst = 0u;
-		u32 tileCount = tileTotal;
-		// frozen frames dispatch no resolve at all, so they must not slide
-		// the window either (the full-coverage default is inert under freeze)
-		bool const forceFullCoverage = (
-			frameMode != FrameMode::PathTrace || pathTraceReset
-			|| probeRequested || !runResolve
-			|| !sBudgetEnabled || sMsPerTileEma <= 0.0
-		);
-		if (!forceFullCoverage) {
-			// window size is only (re)computed when starting a new hold --
-			// held steady at sTileWindowCount for sTileWindowSpp frames in a
-			// row so the same region actually accumulates that many samples
-			// before the cursor moves on
-			if (sTileWindowFrames == 0u) {
-				u32 const want = std::clamp(
-					(u32)((double)sBudgetTargetMs * 0.9 / sMsPerTileEma),
-					1u, tileTotal
-				);
-				// smooth the window size itself: per-tile cost genuinely varies
-				// as the window slides across cheap/expensive screen regions, so
-				// the raw quotient flaps; the ema turns that into a gradual
-				// drift, and does so asymmetrically -- climbing back toward a
-				// higher tile count (more perf headroom) only 3% of the way per
-				// frame, so a lucky cheap frame can't talk it into overcommitting,
-				// but dropping toward a lower tile count (a cost spike eating
-				// into the budget) 40% of the way per frame, so a frame that's
-				// gone over budget recovers in ~2 frames instead of ~7
-				sTileKSmooth = (
-					sTileKSmooth <= 0.0 ? (double)want
-						: (double)want > sTileKSmooth
-							? sTileKSmooth * 0.97 + (double)want * 0.03
-							: sTileKSmooth * 0.6 + (double)want * 0.4
-				);
-				sTileKSmooth = std::min(sTileKSmooth, (double)tileTotal);
-				sTileWindowCount = (
-					std::clamp((u32)(sTileKSmooth + 0.5), 1u, tileTotal)
-				);
-			}
-			tileFirst = sTileCursor % tileTotal;
-			// the region can shrink mid-hold (a focus rect much smaller than
-			// the last full-screen window) -- clamp so the cursor never wraps
-			// duplicate dispatches over the same tiles
-			tileCount = std::min(sTileWindowCount, tileTotal);
-			if (++sTileWindowFrames >= (u32)std::max(sTileWindowSpp, 1)) {
-				sTileCursor = (tileFirst + tileCount) % tileTotal;
-				sTileWindowFrames = 0u;
-			}
-		}
-		sTileKLast = runResolve ? tileCount : 0u;
-
 		constexpr u32 kDenoisePassCount = 4u;
 		constexpr u32 kBloomNodeCount = 2u + kBloomBlurPassCount;
-		vkof::RenderNode nodes[3u + kDenoisePassCount + kBloomNodeCount];
+		vkof::RenderNode nodes[
+			5u + kDenoisePassCount + kBloomNodeCount + 4u
+		];
 		u32 nodeCount = 0u;
 
-		// -- resolve node: trace + shade into colorTarget
+		// -- regir fill node: refills claimed cells before integrate reads them
+		// a pass keeps one fill throughout
+		vkof::RenderNode regirFillNode {};
+		bool const runRegirFill = (
+			runResolve && sRegirEnabled && (passStarts || regirView)
+		);
+		if (runRegirFill) {
+			regirFillNode = ponder::regir_fill(regir);
+			nodes[nodeCount++] = regirFillNode;
+		}
+
+		// -- resolve node: wavefront integrate into colorTarget
+		// colorTarget holds a finished sample only when passComplete
 		vkof::RenderNode resolveNode {};
+		bool passComplete = false;
+		u32 stepFirst = 0u;
+		u32 stepCount = 0u;
+		// region sweeps the finished pass completed
+		u32 sweepCount = 0u;
 		if (runResolve) {
-			resolveNode = (
+			bool const fullPass = (
+				rrActive || headless || !sBudgetEnabled || sStepCost[0] <= 0.0
+				|| sDebugPath.capturePending || probeRequested
+			);
+			// -- fill the frame with the pass's next steps up to the target
+			u32 stepBudget = ponder::skWavefrontPassStepCount;
+			if (!fullPass) {
+				double const megaPaths = (double)wavefront.passPathCount * 1e-6;
+				double const targetMs = (double)sBudgetTargetMs * 0.9;
+				double predictedMs = 0.0;
+				stepBudget = 0u;
+				for (
+					u32 step = wavefront.passStep;
+					step < ponder::skWavefrontPassStepCount;
+					++step
+				) {
+					predictedMs += sStepCost[step] * megaPaths;
+					if (stepBudget > 0u && predictedMs > targetMs) { break; }
+					++stepBudget;
+				}
+			}
+			if (rrActive) {
+				ponder::dlss_rr_prepare(
+					sDlssRr, traceSize, u32v2 { sRenderW, sRenderH }
+				);
+			}
+			auto const integrateInfo = ponder::WavefrontIntegrateInfo {
+				.outputImage = colorTarget,
+				.outputHandle = colorHandle,
+				.aov = ponder::WavefrontAov {
+					.positionImage = gbufferPosImage,
+					.positionHandle = gbufferPosStorageHandle,
+					.normalImage = gbufferNorImage,
+					.normalHandle = gbufferNorStorageHandle,
+					.albedoImage = gbufferAlbedoImage,
+					.albedoHandle = gbufferAlbedoStorageHandle,
+				},
+				.rrGuide = (
+					rrActive
+						? std::optional(ponder::dlss_rr_guide(sDlssRr))
+						: std::nullopt
+				),
+				.globalJitter = (
+					rrActive
+						? std::optional(ponder::dlss_rr_jitter(sDlssRr))
+						: std::nullopt
+				),
+				.spectral = sSpectral,
+				.debugPath = sDebugPath.capturePending,
+				// the clamp is display-referred: luminance after exposure
+				.fireflyClampLuminance = (
+					sFireflyClampEnabled
+						? sFireflyClampLuminance / std::max(sExposure, 1e-6f)
+						: 0.0f
+				),
+				.width = traceSize.x,
+				.height = traceSize.y,
+				.stepBudget = stepBudget,
+			};
+			if (regirView) {
+				ponder::regir_view_prepare(regir);
+				resolveNode = (
+					ponder::regir_view(regir, ponder::RegirViewInfo {
+						.outputImage = colorTarget,
+						.outputHandle = colorHandle,
+						.mode = (u32)sRegirDebug.viewMode,
+						.exposure = sExposure,
+						.width = sRenderW,
+						.height = sRenderH,
+					})
+				);
+				passComplete = true;
+				sweepCount = 1u;
+			} else {
+				ponder::WavefrontIntegrateResult const integrate = (
+					ponder::wavefront_integrate(wavefront, integrateInfo)
+				);
+				resolveNode = integrate.node;
+				passComplete = integrate.passComplete;
+				stepCount = integrate.stepCount;
+				sweepCount = integrate.sweepCount;
+				stepFirst = (
+					(passComplete ? ponder::skWavefrontPassStepCount : wavefront.passStep)
+					- stepCount
+				);
+			}
+			nodes[nodeCount++] = resolveNode;
+		}
+		{
+			double predictedMs = 0.0;
+			for (u32 step = stepFirst; step < stepFirst + stepCount; ++step) {
+				predictedMs += (
+					sStepCost[step] * (double)wavefront.passPathCount * 1e-6
+				);
+			}
+			vkof::profiler_value("wavefront predicted ms", predictedMs);
+			vkof::profiler_value("wavefront measured ms", sResolveMsLast);
+		}
+		vkof::profiler_value("wavefront steps", (double)stepCount);
+		vkof::profiler_value("wavefront passes", passComplete ? 1.0 : 0.0);
+
+		// -- accumulate a finished pass, unless a reset came after its start
+		bool const passCurrent = (
+			regirView ? !accumReset : sPassGeneration == sResetGeneration
+		);
+		bool const addSample = (
+			runResolve && !freezeAccum && passComplete && !rrActive
+		);
+		bool const addReset = (
+			addSample
+			&& (
+				!passCurrent
+				|| (regirView ? accumReset : sAccumGeneration != sPassGeneration)
+			)
+		);
+		if (addSample) {
+			sAccumGeneration = (
+				passCurrent && !regirView ? sPassGeneration : ~0u
+			);
+		}
+
+		// -- regir debug node: resolves the inspected probe's reservoirs after
+		// this frame's fill, when a readback is due
+		vkof::RenderNode regirDebugNode { 0u };
+		if (runRegirFill) {
+			regirDebugNode = ponder::regir_debug_node(regir, sRegirDebug);
+			if (regirDebugNode.id != 0u) {
+				nodes[nodeCount++] = regirDebugNode;
+			}
+		}
+
+		// -- accumulate node: xyz running sum, resolved to linear srgb + display
+		vkof::RenderNode accumNode {};
+		if (!rrActive) {
+			accumNode = ponder::wavefront_accumulate(
+				wavefront,
+				ponder::WavefrontAccumulateInfo {
+					.sampleImage = colorTarget,
+					.sampleHandle = colorHandle,
+					.resolvedImage = ptAccumImage,
+					.resolvedHandle = ptAccumStorageHandle,
+					.outputImage = ptOutputTarget,
+					.outputHandle = ptOutputHandle,
+					.addSample = addSample,
+					.reset = addReset,
+					.exposure = sExposure,
+					.width = sRenderW,
+					.height = sRenderH,
+				}
+			);
+		}
+
+		// -- nan-check node: tallies broken pixels in the raw radiance image
+		vkof::RenderNode manifoldProbeNode {};
+		vkof::RenderNode manifoldShadeNode {};
+		if (
+			sManifoldNeeEnabled
+			&& !freezeAccum
+			&& passComplete
+			&& frameMode == FrameMode::PathTrace
+			&& sScene.bufs.triangleCount > 0u
+		) {
+			manifoldProbeNode = (
+				vkof::render_node_create({
+					.queue = vkof::CommandQueue::graphics,
+				})
+			);
+			vkof::render_node_add_persistent_image({
+				.node = manifoldProbeNode,
+				.image = gbufferPosImage,
+				.access = vkof::RenderNodeAccess::read,
+			});
+			vkof::render_node_add_persistent_image({
+				.node = manifoldProbeNode,
+				.image = gbufferNorImage,
+				.access = vkof::RenderNodeAccess::read,
+			});
+			vkof::render_node_callback({
+				.node = manifoldProbeNode,
+				.callback = [&](vkof::CommandBuffer const & cmd) {
+					GpuManifoldMeshData const caster = {
+						.positionVa = sScene.bufs.positions,
+						.attributeVa = sScene.bufs.attributes,
+						.indexVa = sScene.bufs.flatIndices,
+						.modelMatrix = f32m44_identity(),
+						.triangleCount = sScene.bufs.triangleCount,
+						.pad = 0u,
+					};
+					vkof::buffer_upload({
+						.buffer = manifoldCasterBuffer,
+						.byteOffset = 0u,
+						.data = srat::slice<u8 const>(
+							reinterpret_cast<u8 const *>(&caster),
+							sizeof(caster)
+						),
+					});
+					GpuManifoldProbePC const probePC = {
+						.casterVa = (
+							vkof::buffer_virtual_address(manifoldCasterBuffer)
+						),
+						.pointWo = sManifoldPointWo,
+						.gbufferPosHandle = gbufferPosStorageHandle,
+						.gbufferNorHandle = gbufferNorStorageHandle,
+						.width = sRenderW,
+						.height = sRenderH,
+						.frameIndex = sFrameIndex,
+						.countsVa = (
+							vkof::buffer_virtual_address(manifoldCountsBuffer)
+						),
+						.bendPointsVa = (
+							vkof::buffer_virtual_address(manifoldBendPointBuffer)
+						),
+					};
+					vkof::cmd_dispatch_pushconst(
+						vkof::CmdDispatchPushconst {
+							.cmd = cmd,
+							.pipeline = manifoldProbePipeline,
+							.push = probePC,
+							.threadgroupSize = u32v3 { 16u, 16u, 1u },
+							.invocationCount = u32v3 { sRenderW, sRenderH, 1u },
+						}
+					);
+				},
+			});
+			nodes[nodeCount++] = manifoldProbeNode;
+
+			manifoldShadeNode = (
 				vkof::render_node_create({
 					.queue = vkof::CommandQueue::graphics,
 				})
 			);
 			vkof::render_node_add_image({
-				.node = resolveNode,
+				.node = manifoldShadeNode,
 				.image = colorTarget,
-				.access = vkof::RenderNodeAccess::write,
-			});
-			vkof::render_node_add_persistent_image({
-				.node = resolveNode,
-				.image = gbufferPosImage,
-				.access = vkof::RenderNodeAccess::write,
-			});
-			vkof::render_node_add_persistent_image({
-				.node = resolveNode,
-				.image = gbufferNorImage,
-				.access = vkof::RenderNodeAccess::write,
-			});
-			vkof::render_node_add_persistent_image({
-				.node = resolveNode,
-				.image = gbufferAlbedoImage,
-				.access = vkof::RenderNodeAccess::write,
+				.access = vkof::RenderNodeAccess::readWrite,
 			});
 			vkof::render_node_callback({
-				.node = resolveNode,
+				.node = manifoldShadeNode,
 				.callback = [&](vkof::CommandBuffer const & cmd) {
-					// full screen coverage collapses to a single screen-sized
-					// dispatch (and, via a zero salt, seeds identically to
-					// the pre-budget path); a partial window -- or any focus
-					// region, even fully covered -- goes one dispatch per
-					// tile with a pixel origin
-					bool const full = fullScreen && tileCount >= tileTotal;
-					u32 const dispatchCount = full ? 1u : tileCount;
-					for (u32 i = 0u; i < dispatchCount; ++i) {
-						u32 const tile = (tileFirst + i) % tileTotal;
-						u32 const originX = (
-							full ? 0u
-								: (regionTileX + tile % regionGridW)
-									* kPtTileSize
-						);
-						u32 const originY = (
-							full ? 0u
-								: (regionTileY + tile / regionGridW)
-									* kPtTileSize
-						);
-						u32 const extentX = (
-							full ? sRenderW
-								: std::min(kPtTileSize, sRenderW - originX)
-						);
-						u32 const extentY = (
-							full ? sRenderH
-								: std::min(kPtTileSize, sRenderH - originY)
-						);
-						GpuResolvePC const resolvePC = {
-							.bluenoiseVa = (
-								vkof::buffer_virtual_address(
-									bluenoise.handleBuffer
-								)
-							),
-							.outputImageHandle = colorHandle,
-							.frameIndex = sFrameIndex,
-							.bluenoiseCount = ponder::Bluenoise::kCount,
-							.kullaContyEnergyHandle = (
-								energyTables.kullaContyEnergyHandle
-							),
-							.zeltnerLtcParamHandle = (
-								zeltnerTables.zeltnerLtcParamHandle
-							),
-							.tileOriginX = originX,
-							.tileOriginY = originY,
-							.gbufferPosHandle = gbufferPosStorageHandle,
-							.gbufferNorHandle = gbufferNorStorageHandle,
-							.gbufferAlbedoHandle = gbufferAlbedoStorageHandle,
-						};
-						vkof::cmd_dispatch_pushconst(
-							vkof::CmdDispatchPushconst {
-								.cmd = cmd,
-								.pipeline = resolvePipeline,
-								.push = resolvePC,
-								.threadgroupSize = u32v3 { 16u, 16u, 1u },
-								.invocationCount = (
-									u32v3 { extentX, extentY, 1u }
-								),
-							}
-						);
-					}
+					GpuManifoldShadePC const shadePC = {
+						.bendPointsVa = (
+							vkof::buffer_virtual_address(manifoldBendPointBuffer)
+						),
+						.colorHandle = colorHandle,
+						.width = sRenderW,
+						.height = sRenderH,
+						.pad0 = 0u,
+						.debugColor = sManifoldDebugColor,
+						.pad1 = 0u,
+					};
+					vkof::cmd_dispatch_pushconst(
+						vkof::CmdDispatchPushconst {
+							.cmd = cmd,
+							.pipeline = manifoldShadePipeline,
+							.push = shadePC,
+							.threadgroupSize = u32v3 { 16u, 16u, 1u },
+							.invocationCount = u32v3 { sRenderW, sRenderH, 1u },
+						}
+					);
 				},
 			});
-			nodes[nodeCount++] = resolveNode;
+			nodes[nodeCount++] = manifoldShadeNode;
 		}
 
-		// -- accumulate node: temporal average + exposure + tonemap
-		vkof::RenderNode const accumNode = (
-			vkof::render_node_create({ .queue = vkof::CommandQueue::graphics })
-		);
-		if (!freezeAccum && frameMode != FrameMode::Clear) {
-			// frozen frames never read the (possibly undispatched, possibly
-			// probe-only) resolve output, so the dependency is dropped too.
-			// Clear mode doesn't read it either -- resolve.comp doesn't run
-			// that frame at all
-			vkof::render_node_add_image({
-				.node = accumNode,
-				.image = colorTarget,
-				.access = vkof::RenderNodeAccess::read,
-			});
-		}
-		vkof::render_node_add_persistent_image({
-			.node = accumNode,
-			.image = ptAccumImage,
-			.access = vkof::RenderNodeAccess::readWrite,
-		});
-		vkof::render_node_add_image({
-			.node = accumNode,
-			.image = ptOutputTarget,
-			.access = vkof::RenderNodeAccess::write,
-		});
-		vkof::render_node_callback({
-			.node = accumNode,
-			.callback = [&](vkof::CommandBuffer const & cmd) {
-				GpuPtAccumulatePC const accumPC = {
-					.inputHandle = colorHandle,
-					.accumHandle = ptAccumStorageHandle,
-					.outputHandle = ptOutputHandle,
-					.reset = (
-						frameMode == FrameMode::PathTrace && pathTraceReset
-					) ? 1u : 0u,
-					.sppCounterVa = (
-						vkof::buffer_virtual_address(sppCounterBuffer)
-					),
-					.freeze = freezeAccum ? 1u : 0u,
-					.maxSpp = sMaxSpp > 0 ? (u32)sMaxSpp : 0u,
-					.tileFirst = tileFirst,
-					.tileCount = tileCount,
-					.tileGridW = regionGridW,
-					.tileTotal = tileTotal,
-					.regionTileX = regionTileX,
-					.regionTileY = regionTileY,
-				};
-				vkof::cmd_dispatch_pushconst(vkof::CmdDispatchPushconst {
-					.cmd = cmd,
-					.pipeline = ptAccumulatePipeline,
-					.push = accumPC,
-					.threadgroupSize = u32v3 { 16u, 16u, 1u },
-					.invocationCount = u32v3 { sRenderW, sRenderH, 1u },
-				});
-			},
-		});
-
-		// -- nan-check node: tallies broken pixels in the raw radiance image;
-		// skipped on frozen frames (nothing new is accumulated, and a
-		// probe-only resolve's discarded sample shouldn't count), and on
-		// View/Clear (View's output isn't real path-traced radiance to
-		// sanity-check; Clear produces no new data at all)
 		vkof::RenderNode nanCheckNode {};
-		if (!freezeAccum && frameMode == FrameMode::PathTrace) {
+		// a partial pass leaves the rest of the sample image undefined
+		bool const passCoversRegion = (
+			wavefront.passPathCount == wavefront.passSlotCount
+		);
+		ponder::WavefrontRegion const nanRegion = wavefront.passRegion;
+		if (
+			!freezeAccum && passComplete && passCoversRegion
+			&& frameMode == FrameMode::PathTrace
+		) {
 			nanCheckNode = (
 				vkof::render_node_create({
 					.queue = vkof::CommandQueue::graphics,
@@ -1529,31 +1959,11 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			vkof::render_node_callback({
 				.node = nanCheckNode,
 				.callback = [&](vkof::CommandBuffer const & cmd) {
-					// mirrors the resolve dispatch window exactly: only the
-					// tiles traced this frame hold fresh radiance, the rest
-					// of colorTarget is stale and would recount old pixels
-					bool const full = fullScreen && tileCount >= tileTotal;
-					u32 const dispatchCount = full ? 1u : tileCount;
-					for (u32 i = 0u; i < dispatchCount; ++i) {
-						u32 const tile = (tileFirst + i) % tileTotal;
-						u32 const originX = (
-							full ? 0u
-								: (regionTileX + tile % regionGridW)
-									* kPtTileSize
-						);
-						u32 const originY = (
-							full ? 0u
-								: (regionTileY + tile / regionGridW)
-									* kPtTileSize
-						);
-						u32 const extentX = (
-							full ? sRenderW
-								: std::min(kPtTileSize, sRenderW - originX)
-						);
-						u32 const extentY = (
-							full ? sRenderH
-								: std::min(kPtTileSize, sRenderH - originY)
-						);
+					{
+						u32 const originX = nanRegion.origin.x;
+						u32 const originY = nanRegion.origin.y;
+						u32 const extentX = nanRegion.extent.x;
+						u32 const extentY = nanRegion.extent.y;
 						GpuNanCheckPC const nanCheckPC = {
 							.countsVa = (
 								vkof::buffer_virtual_address(nanCountsBuffer)
@@ -1581,18 +1991,42 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			});
 			nodes[nodeCount++] = nanCheckNode;
 		}
-		nodes[nodeCount++] = accumNode;
+		// -- dlss ray reconstruction nodes, in place of accumulate
+		ponder::DlssRrNodes rrNodes {};
+		if (rrActive) {
+			rrNodes = ponder::dlss_rr_nodes(
+				sDlssRr,
+				ponder::DlssRrFrameInfo {
+					.colorImage = colorTarget,
+					.colorHandle = colorHandle,
+					.aov = ponder::WavefrontAov {
+						.positionImage = gbufferPosImage,
+						.positionHandle = gbufferPosStorageHandle,
+						.normalImage = gbufferNorImage,
+						.normalHandle = gbufferNorStorageHandle,
+						.albedoImage = gbufferAlbedoImage,
+						.albedoHandle = gbufferAlbedoStorageHandle,
+					},
+					.resolvedImage = ptAccumImage,
+					.resolvedHandle = ptAccumStorageHandle,
+					.outputImage = ptOutputTarget,
+					.outputHandle = ptOutputHandle,
+					.exposure = sExposure,
+					.camera = viewCamera,
+					.quality = sDlssRrQuality,
+					.preset = sDlssRrPreset,
+					.reset = rrReset,
+				}
+			);
+			nodes[nodeCount++] = rrNodes.prepare;
+			nodes[nodeCount++] = rrNodes.evaluate;
+			nodes[nodeCount++] = rrNodes.resolve;
+		} else {
+			nodes[nodeCount++] = accumNode;
+		}
 
-		// -- denoise nodes: variance-adaptive a-trous spatial filter over
-		// ptAccumImage's running mean (see pt-denoise.comp's header comment
-		// for why this is spatial-only, no temporal reprojection). only
-		// meaningful once there's a converging pathtrace average to filter,
-		// and only affects the presented ptOutputTarget -- screenshots read
-		// ptAccumImage directly (see the headless path below), so this can
-		// never bias a ground-truth render, only the live view
-		bool const runDenoise = (
-			sDenoiseEnabled && frameMode == FrameMode::PathTrace
-		);
+		// -- denoise nodes
+		bool const runDenoise = sDenoiseEnabled && !rrActive;
 		vkof::RenderNode denoiseNodes[kDenoisePassCount] {};
 		if (runDenoise) {
 			vkof::Image passInputImage = ptAccumImage;
@@ -1636,7 +2070,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					.image = gbufferAlbedoImage,
 					.access = vkof::RenderNodeAccess::read,
 				});
-				// pass 0's input IS ptAccumImage (already declared above)
 				if (passInputImage.id != ptAccumImage.id) {
 					vkof::render_node_add_persistent_image({
 						.node = node,
@@ -1690,10 +2123,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			}
 		}
 
-		// -- bloom: bright-pass extract off ptAccumImage, a few widening
-		// blur passes, then an additive composite onto whatever's currently
-		// in ptOutputTarget (accum's or denoise's tonemapped result --
-		// bloom runs after both, so it doesn't care which)
+		// -- bloom
 		bool const runBloom = (
 			sBloomEnabled && frameMode == FrameMode::PathTrace
 		);
@@ -1736,8 +2166,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			bloomNodes[bloomNodeIndex++] = extractNode;
 			nodes[nodeCount++] = extractNode;
 
-			// blur passes ping-pong between bloomAImage/bloomBImage; pass 0
-			// reads what extract just wrote (bloomAImage)
 			vkof::Image blurSrcImage = bloomAImage;
 			u32 blurSrcSamplerHandle = bloomASamplerHandle;
 			for (u32 i = 0u; i < kBloomBlurPassCount; ++i) {
@@ -1832,21 +2260,86 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 
 		if (pathTraceReset || frameMode == FrameMode::Clear) {
 			fnZeroNanCounts();
+			fnZeroManifoldCounts();
 			fnZeroSppCounter();
+		}
+
+		// -- display dither node: the 8-bit presented image
+		vkof::RenderNode ditherNode {};
+		if (!headless) {
+			u32 const displayHandle = vkof::transient_image_storage_handle({
+				.image = displayTarget,
+				.mipLevel = 0u,
+			});
+			ditherNode = (
+				vkof::render_node_create({
+					.queue = vkof::CommandQueue::graphics,
+					.debugName = "display dither",
+				})
+			);
+			vkof::render_node_add_image({
+				.node = ditherNode,
+				.image = ptOutputTarget,
+				.access = vkof::RenderNodeAccess::read,
+			});
+			vkof::render_node_add_image({
+				.node = ditherNode,
+				.image = displayTarget,
+				.access = vkof::RenderNodeAccess::write,
+			});
+			vkof::render_node_callback({
+				.node = ditherNode,
+				.callback = [&, displayHandle](vkof::CommandBuffer const & cmd) {
+					GpuDisplayDitherPC const ditherPC = {
+						.inputHandle = ptOutputHandle,
+						.outputHandle = displayHandle,
+						.frameIndex = sFrameIndex,
+					};
+					vkof::cmd_dispatch_pushconst(vkof::CmdDispatchPushconst {
+						.cmd = cmd,
+						.pipeline = displayDitherPipeline,
+						.push = ditherPC,
+						.threadgroupSize = u32v3 { 16u, 16u, 1u },
+						.invocationCount = u32v3 { sRenderW, sRenderH, 1u },
+					});
+				},
+			});
+			nodes[nodeCount++] = ditherNode;
 		}
 
 		vkof::render_graph_execute({
 			.nodes = srat::slice<vkof::RenderNode const>(nodes, nodeCount),
 			.rootPushconstant = srat::slice_as_bytes(globalPC),
-			.finalImage = headless ? vkof::TransientImage { 0 } : ptOutputTarget,
+			.finalImage = headless ? vkof::TransientImage { 0 } : displayTarget,
 		});
+		if (!headless) {
+			vkof::render_node_destroy(ditherNode);
+		}
+		if (runRegirFill) {
+			vkof::render_node_destroy(regirFillNode);
+			if (regirDebugNode.id != 0u) {
+				vkof::render_node_destroy(regirDebugNode);
+			}
+			// blocking, and only every refreshInterval frames
+			ponder::regir_debug_readback(
+				regir, sRegirDebug, sTimeline.frame, sFrameIndex, sRegirCellSize
+			);
+		}
 		if (runResolve) {
 			vkof::render_node_destroy(resolveNode);
 		}
 		if (!freezeAccum) {
 			vkof::render_node_destroy(nanCheckNode);
+			vkof::render_node_destroy(manifoldProbeNode);
+			vkof::render_node_destroy(manifoldShadeNode);
 		}
-		vkof::render_node_destroy(accumNode);
+		if (rrActive) {
+			vkof::render_node_destroy(rrNodes.prepare);
+			vkof::render_node_destroy(rrNodes.evaluate);
+			vkof::render_node_destroy(rrNodes.resolve);
+		} else {
+			vkof::render_node_destroy(accumNode);
+		}
 		if (runDenoise) {
 			for (u32 i = 0u; i < kDenoisePassCount; ++i) {
 				vkof::render_node_destroy(denoiseNodes[i]);
@@ -1858,44 +2351,75 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			}
 		}
 
-		// -- frame-budget measurement: the timestamp readback inside
-		// render_graph_execute above is for the previous use of this frame
-		// slot, so node_gpu_ms(0) -- resolve is always declared first when
-		// it runs -- pairs with the window recorded there two frames ago
+		// -- frame-budget measurement
 		{
 			u32 const slot = sFrameIndex % 2u;
-			TileFrameHistory const prev = sTileHistory[slot];
-			if (prev.resolveRan && prev.tileCount > 0u) {
-				double const gpuMs = vkof::node_gpu_ms(0u);
-				if (gpuMs > 0.0) {
+			ResolveFrameHistory const prev = sResolveHistory[slot];
+			if (prev.resolveRan) {
+				double const gpuMs = vkof::node_gpu_ms(prev.resolveNodeIndex);
+				if (gpuMs > 0.0 && prev.stepCount > 0u && prev.pathCount > 0u) {
 					sResolveMsLast = gpuMs;
-					double const perTile = gpuMs / (double)prev.tileCount;
-					sMsPerTileEma = (
-						sMsPerTileEma <= 0.0
-							? perTile
-							: sMsPerTileEma * 0.8 + perTile * 0.2
+					double const megaPaths = (double)prev.pathCount * 1e-6;
+					u32 const stepLast = prev.stepFirst + prev.stepCount;
+					// -- first measurement: spread evenly
+					if (sStepCost[0] <= 0.0) {
+						for (double & cost : sStepCost) {
+							cost = gpuMs / ((double)prev.stepCount * megaPaths);
+						}
+					}
+					// -- scale the frame's steps toward the measured total;
+					// frames cover different step mixes, so the per-step
+					// split converges
+					double predictedMs = 0.0;
+					for (u32 step = prev.stepFirst; step < stepLast; ++step) {
+						predictedMs += sStepCost[step] * megaPaths;
+					}
+					double const scale = (
+						1.0 + 0.3 * (gpuMs / predictedMs - 1.0)
 					);
+					for (u32 step = prev.stepFirst; step < stepLast; ++step) {
+						sStepCost[step] *= scale;
+					}
 				}
 			}
-			sTileHistory[slot] = TileFrameHistory {
+			sResolveHistory[slot] = ResolveFrameHistory {
 				.resolveRan = runResolve,
-				.tileCount = runResolve ? tileCount : 0u,
+				.stepFirst = stepFirst,
+				.stepCount = stepCount,
+				.pathCount = wavefront.passPathCount,
+				.resolveNodeIndex = runRegirFill ? 1u : 0u,
 			};
 		}
 
 		++sFrameIndex;
+		// -- the timeline advances one frame per finished region sweep
+		if (
+			sTimeline.playing
+			&& frameMode == FrameMode::PathTrace
+			&& addSample
+		) {
+			sTimeline.frame += sweepCount;
+		}
 		sAccumFrames = (
-			(pathTraceReset || frameMode == FrameMode::Clear)
+			addReset
 				? 1u
-				: (freezeAccum ? sAccumFrames : sAccumFrames + 1u)
+				: (addSample ? sAccumFrames + 1u : sAccumFrames)
 		);
+		sPreviousFrameMode = frameMode;
+		// region sweeps this frame completed; an rr frame is one whole pass
+		if (rrActive) { return passComplete ? 1u : 0u; }
+		return addSample ? sweepCount : 0u;
 	};
 
 	if (headless) {
 		fnUploadFrameState();
-		for (u32 frame = 0u; frame < std::max(args.spp, 1u); ++frame) {
-			fnRenderFrame(
-				FrameMode::PathTrace, /*pathTraceReset=*/frame == 0u, false, false
+		// a pass samples only part of the image when the path budget is
+		// smaller, so count sweeps, not frames
+		u32 sweeps = 0u;
+		for (u32 frame = 0u; sweeps < std::max(args.spp, 1u); ++frame) {
+			sweeps += fnRenderFrame(
+				FrameMode::PathTrace, /*pathTraceReset=*/frame == 0u, false, false,
+				/*rrReset=*/frame == 0u
 			);
 		}
 		vkof::screenshot(ptAccumImage, args.screenshotPath, sExposure);
@@ -1907,13 +2431,27 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			}
 		}
 		{
-			// screenshot above waited for device idle, so the counters are
-			// final here
 			u32 const * const nanCounts = (
 				reinterpret_cast<u32 const *>(
 					vkof::buffer_host_address(nanCountsBuffer).ptr()
 				)
 			);
+			if (sManifoldNeeEnabled) {
+				u32 const * const manifoldCounts = (
+					reinterpret_cast<u32 const *>(
+						vkof::buffer_host_address(manifoldCountsBuffer).ptr()
+					)
+				);
+				printf(
+					"[manifold] %u seeds, %u converged (%.1f%%),"
+					" %u left surface\n",
+					manifoldCounts[0], manifoldCounts[1],
+					manifoldCounts[0] > 0u
+						? 100.0 * (f64)manifoldCounts[1] / (f64)manifoldCounts[0]
+						: 0.0,
+					manifoldCounts[2]
+				);
+			}
 			if (nanCounts[0] > 0u || nanCounts[1] > 0u) {
 				printf(
 					"ERROR: %u NaN / %u Inf pixels in the framebuffer\n",
@@ -1929,12 +2467,19 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		GLFWwindow * const window = vkof::window();
 		ponder::camera_controller_install_scroll_callback(window);
 		bool rightMouseWasDown = false;
-		// in-flight focus-region drag (right button held in focus mode);
-		// anchor is in window coordinates, same space as glfwGetCursorPos
+		bool leftMouseWasDown = false;
 		bool focusDragActive = false;
 		ImVec2 focusDragAnchor { 0.0f, 0.0f };
+		bool sRunInBackground = true;
 
 		while (!glfwWindowShouldClose(window)) {
+			if (
+				!sRunInBackground
+				&& glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_FALSE
+			) {
+				glfwWaitEventsTimeout(0.1);
+				continue;
+			}
 			glfwPollEvents();
 			if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
 				glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -1945,41 +2490,123 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			f64 curMouseX, curMouseY;
 			glfwGetCursorPos(window, &curMouseX, &curMouseY);
 
-			// set below by the imguizmo drag; shares cameraMoved's View-mode
-			// treatment in the frame-mode state machine further down
 			bool gizmoUsed = false;
 			bool const mouseFree = !ImGui::GetIO().WantCaptureMouse;
-			bool const cameraMoved = ponder::camera_controller_update(
-				camController, window, fnActiveBoundsExtent(),
-				ImGui::GetIO().DeltaTime
+			// hold v: left-drag selects a tile region, right-click clears it
+			bool const tileSelectHeld = (
+				!ImGui::GetIO().WantCaptureKeyboard
+				&& glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS
 			);
-			// right-click is moded: normally it probes the pixel under the
-			// cursor (press edge only, not held) for its material index; in
-			// focus mode it drags out the focus region instead, so the probe
-			// is unavailable while that checkbox is on. glfwGetCursorPos is
-			// in window/screen coordinates, the same space as
-			// glfwGetWindowSize, not the internal render resolution
-			// (sRenderW/sRenderH) -- the finalImage blit scales between the
-			// two (see skRenderResPresets' comment), so both need rescaling
-			// to land on the right texels
+			bool const cameraMoved = (
+				!ponder::debug_path_picking()
+				&& !tileSelectHeld
+				&& !focusDragActive
+				&& ponder::camera_controller_update(
+					camController, window, fnActiveBoundsExtent(),
+					ImGui::GetIO().DeltaTime
+				)
+			);
+			if (ponder::debug_path_picking() || tileSelectHeld || focusDragActive) {
+				ponder::camera_controller_scroll_discard();
+			}
+			// -- b + wheel: lens radius, geometric steps; below the floor is 0
+			if (
+				ImGui::IsKeyDown(ImGuiKey_B) && mouseFree
+				&& !ImGui::GetIO().WantTextInput
+				&& ImGui::GetIO().MouseWheel != 0.0f
+			) {
+				f32 constexpr kFloor = 0.001f;
+				f32 const radius = (
+					std::max(sLensRadius, kFloor)
+					* std::pow(1.5f, ImGui::GetIO().MouseWheel)
+				);
+				sLensRadius = radius < kFloor ? 0.0f : std::min(radius, 0.1f);
+				sLensChanged = true;
+			}
+			{
+				i32 windowW, windowH;
+				glfwGetWindowSize(window, &windowW, &windowH);
+				f32v2 const windowSize = { (f32)windowW, (f32)windowH };
+				if (!ptAccumImguiId) {
+					ptAccumImguiId = (
+						vkof::image_imgui_id({
+							.image = ptAccumImage,
+							.sampler = magnifierSampler,
+						})
+					);
+				}
+				auto const viewCamera = ponder::DebugPathCamera {
+					.position = (
+						sFirstPerson ? camFp.position : srat::camera_orbit_eye(cam)
+					),
+					.forward = (
+						sFirstPerson
+							? srat::camera_fp_forward(camFp)
+							: cam.target - srat::camera_orbit_eye(cam)
+					),
+					.fovY = sFirstPerson ? camFp.fovY : cam.fovY,
+					.renderWidth = sRenderW,
+					.renderHeight = sRenderH,
+				};
+				ponder::debug_path_input(
+					sDebugPath,
+					ponder::DebugPathInputInfo {
+						.camera = viewCamera,
+						.image = ptAccumImguiId,
+						.renderWidth = sRenderW,
+						.renderHeight = sRenderH,
+						.windowSize = windowSize,
+					}
+				);
+				ponder::debug_path_overlay(sDebugPath, viewCamera, windowSize);
+				if (sRegirEnabled) {
+					ponder::regir_debug_overlay(sRegirDebug, viewCamera, windowSize);
+				}
+			}
+			bool const timelineReset = ponder::timeline_imgui(sTimeline);
+			ponder::debug_path_imgui(sDebugPath);
+			if (sDebugPath.regirInspectSlot != ponder::skWavefrontRegirSlotInvalid) {
+				ponder::regir_debug_select(sRegirDebug, sDebugPath.regirInspectSlot);
+				sDebugPath.regirInspectSlot = ponder::skWavefrontRegirSlotInvalid;
+			}
+			if (sDebugPath.regirClearRequested) {
+				ponder::regir_debug_select(
+					sRegirDebug, ponder::skWavefrontRegirSlotInvalid
+				);
+				sDebugPath.regirClearRequested = false;
+			}
+			if (sRegirEnabled) {
+				ponder::regir_debug_imgui(
+					sRegirDebug,
+					sFirstPerson ? camFp.position : srat::camera_orbit_eye(cam)
+				);
+			}
 			bool const rightMouseDown = (
 				glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS
 			);
-			if (sFocusMode) {
-				// only the press edge needs mouseFree; a drag that wanders
-				// over an imgui window mid-hold still finishes cleanly
+			bool const leftMouseDown = (
+				glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS
+			);
+			if (tileSelectHeld || focusDragActive) {
 				if (mouseFree && rightMouseDown && !rightMouseWasDown) {
+					focusDragActive = false;
+					sFocusActive = false;
+				}
+				if (
+					tileSelectHeld && mouseFree
+					&& leftMouseDown && !leftMouseWasDown
+				) {
 					focusDragActive = true;
 					focusDragAnchor = ImVec2((f32)curMouseX, (f32)curMouseY);
 				}
-				if (focusDragActive && rightMouseDown) {
+				if (focusDragActive && leftMouseDown) {
 					ImGui::GetForegroundDrawList()->AddRect(
 						focusDragAnchor,
 						ImVec2((f32)curMouseX, (f32)curMouseY),
 						IM_COL32(255, 200, 0, 255)
 					);
 				}
-				if (focusDragActive && !rightMouseDown) {
+				if (focusDragActive && !leftMouseDown) {
 					focusDragActive = false;
 					i32 windowW, windowH;
 					glfwGetWindowSize(window, &windowW, &windowH);
@@ -1990,9 +2617,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						std::abs((f32)curMouseY - focusDragAnchor.y)
 					);
 					if (dragW < 4.0f || dragH < 4.0f) {
-						// a click (or degenerate sliver) clears back to the
-						// full screen -- the natural "never mind" gesture
-						// since the probe is off in this mode
 						sFocusActive = false;
 					} else if (windowW > 0 && windowH > 0) {
 						f32 const x0 = (
@@ -2022,7 +2646,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						sFocusActive = true;
 					}
 				}
-			} else if (mouseFree && rightMouseDown && !rightMouseWasDown) {
+			} else if (
+				mouseFree
+				&& rightMouseDown
+				&& !rightMouseWasDown
+				&& !ponder::debug_path_picking()
+			) {
 				i32 windowW, windowH;
 				glfwGetWindowSize(window, &windowW, &windowH);
 				if (windowW > 0 && windowH > 0) {
@@ -2040,32 +2669,21 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 			}
 			rightMouseWasDown = rightMouseDown;
-			// committed focus region: outline the tile-snapped rect that
-			// actually dispatches (fnFocusTileBounds, shared with
-			// fnRenderFrame) and dim everything outside it, so the frozen
-			// surroundings are unmistakable
+			leftMouseWasDown = leftMouseDown;
 			if (sFocusActive) {
 				i32 windowW, windowH;
 				glfwGetWindowSize(window, &windowW, &windowH);
 				if (windowW > 0 && windowH > 0) {
-					u32 const gridW = (
-						(sRenderW + kPtTileSize - 1u) / kPtTileSize
-					);
-					u32 const gridH = (
-						(sRenderH + kPtTileSize - 1u) / kPtTileSize
-					);
-					FocusTileBounds const b = fnFocusTileBounds(gridW, gridH);
+					ponder::WavefrontRegion const r = fnFocusRegion();
 					f32 const sx = (f32)windowW / (f32)sRenderW;
 					f32 const sy = (f32)windowH / (f32)sRenderH;
 					ImVec2 const p0 {
-						(f32)(b.x0 * kPtTileSize) * sx,
-						(f32)(b.y0 * kPtTileSize) * sy,
+						(f32)r.origin.x * sx,
+						(f32)r.origin.y * sy,
 					};
 					ImVec2 const p1 {
-						(f32)std::min((b.x1 + 1u) * kPtTileSize, sRenderW)
-							* sx,
-						(f32)std::min((b.y1 + 1u) * kPtTileSize, sRenderH)
-							* sy,
+						(f32)(r.origin.x + r.extent.x) * sx,
+						(f32)(r.origin.y + r.extent.y) * sy,
 					};
 					ImDrawList * const dl = ImGui::GetForegroundDrawList();
 					u32 const dim = IM_COL32(0, 0, 0, 96);
@@ -2087,19 +2705,24 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 			}
 
-			bool settingsChanged = false;
-			// set by clicking a model in the list below; the load happens
-			// after the imgui window is finished, outside its scope
+			bool settingsChanged = (
+				sRegirDebug.viewChanged || sLensChanged
+			);
+			sRegirDebug.viewChanged = false;
+			sLensChanged = false;
+			if (sRegirDebug.clearRequested) {
+				ponder::regir_clear(regir);
+				ponder::regir_debug_select(
+					sRegirDebug, ponder::skWavefrontRegirSlotInvalid
+				);
+				sRegirDebug.clearRequested = false;
+				settingsChanged = true;
+			}
 			std::string pendingLoadPath;
-			// same deferral for the exr environment-map picker
 			std::string pendingEnvMapPath;
-			// and for the vdb picker / the two unload buttons (file view only)
 			std::string pendingVdbPath;
 			bool pendingUnloadModel = false;
 			bool pendingUnloadVdb = false;
-			// stage mode: new/open/save/unload buttons and the add-instance
-			// pickers all defer the same way, for the same reason (loads
-			// wait for device idle and do their own upload work)
 			bool pendingNewStage = false;
 			std::string pendingOpenStagePath;
 			bool pendingSaveStage = false;
@@ -2107,10 +2730,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 			std::string pendingAddGltfPath;
 			std::string pendingAddVdbPath;
 			bool stageInstancesChanged = false;
-			// set inside the "viewer" window below (outliner delete button,
-			// models-panel drag-into-instances drop target); the actual
-			// blas/tlas rebuild this implies is deferred to after
-			// ImGui::End() -- see that block's own comment for why
 			bool gltfInstanceCountChanged = false;
 			stage::FocusRequest focusRequest;
 			{
@@ -2159,22 +2778,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 
 				if (sMode == ViewerMode::StageEdit) {
-					// editing (transforms, material overrides, per-blob
-					// sigma, cameras, lights, environment) all lives here --
-					// see lib/stage/src/stage-imgui.cpp. the outliner's own
-					// "delete" button and the models panel's drag-into-
-					// instances drop target both mutate sStage.gltfInstances
-					// directly, from inside this still-open "viewer" window
-					// -- note the actual blas/tlas rebuild this implies is
-					// deliberately NOT done here (see gltfInstanceCountChanged
-					// below): stage_render_rebuild_blases calls
-					// vkof::device_wait_idle() and destroys/recreates gpu
-					// resources, which must never run while an ImGui::Begin()
-					// window is still open -- an exception or abort partway
-					// through unwinds past this window's ImGui::End() below,
-					// corrupting imgui's window stack ("missing End()" for
-					// "viewer"). found via exactly that crash report after
-					// the drag-and-drop-into-instances feature landed
 					usize const gltfCountBefore = sStage.gltfInstances.size();
 					stageInstancesChanged |= (
 						stage::stage_imgui_edit(sStage, &focusRequest)
@@ -2218,11 +2821,15 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 							settingsPath.string().c_str()
 						);
 					} else {
-						// grouped by modelPaths root (ponder::scan_asset_paths keeps
-						// each root's entries contiguous and sorted), one
-						// collapsing header per configured library directory
+						if (ImGui::TreeNode("tag filter")) {
+							ponder::asset_tag_filter_draw(
+								sModelTagFilter, "model tag filter"
+							);
+							ImGui::TreePop();
+						}
 						pendingLoadPath = ponder::asset_list_draw(
-							sModelList, sCurrentModelPath, "model list", 160.0f
+							sModelList, sCurrentModelPath, "model list", 160.0f,
+							&sModelTagFilter
 						);
 					}
 					ImGui::SeparatorText("vdb");
@@ -2242,8 +2849,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						);
 					}
 				}
-				// file view only: stage mode edits the same knobs per-blob,
-				// in stage_imgui_edit's own vdb instance inspector instead
 				if (sMode == ViewerMode::FileView && sVdb.handleBuffer.id != 0u) {
 					settingsChanged |= ImGui::DragFloat3(
 						"sigma absorption##vdb", &sVdbSigmaAbsorption.x,
@@ -2315,17 +2920,13 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					);
 				}
 				ImGui::SeparatorText("environment");
-				// indices match ENV_MODE_* in environment.glsl
 				static char const * const skEnvModes[] = {
 					"furnace", "checkerboard", "black", "hdrmap (exr)",
 				};
 				settingsChanged |= (
 					ImGui::Combo("mode", &sEnvMode, skEnvModes, 4)
 				);
-				if (sEnvMode == 3) { // ENV_MODE_HDRMAP
-					// which .exr backs hdrmap mode; picks from settings.json's
-					// environmentMapPaths scan. the actual load is deferred
-					// out of the imgui scope (like the model switch below)
+				if (sEnvMode == 3) {
 					std::string const curLabel = (
 						sCurrentEnvMapPath.empty()
 							? std::string("[none]")
@@ -2346,8 +2947,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 							bool const isCurrent = (
 								entry.path.string() == sCurrentEnvMapPath
 							);
-							// full path as id: filenames can repeat across
-							// roots
 							ImGui::PushID(entry.path.string().c_str());
 							if (
 								ImGui::Selectable(label.c_str(), isCurrent)
@@ -2363,22 +2962,71 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						ImGui::EndCombo();
 					}
 				}
-				settingsChanged |= (
-					ImGui::SliderFloat("env intensity", &sEnvIntensity, 0.0f, 4.0f)
-				);
-				// backdrop only (primary-ray misses); the lighting the scene
-				// receives keeps using env intensity above
+				ImGui::Text("environment intensity");
 				settingsChanged |= (
 					ImGui::SliderFloat(
-						"background intensity", &sEnvBackgroundIntensity,
+						"##env intensity",
+						&sEnvIntensity,
+						0.0f,
+						4.0f,
+						"%.3f",
+						ImGuiSliderFlags_Logarithmic
+					)
+				);
+				ImGui::Text("background intensity");
+				settingsChanged |= (
+					ImGui::SliderFloat(
+						"###background intensity", &sEnvBackgroundIntensity,
 						0.0f, 4.0f, "%.3f", ImGuiSliderFlags_Logarithmic
 					)
 				);
-				// no-op outside hdrmap mode; see GpuGlobalExtended.envNeeEnabled
 				settingsChanged |= (
-					ImGui::Checkbox("env NEE (MIS)", &sEnvNeeEnabled)
+					ImGui::Checkbox("mesh NEE (MIS)", &sMeshNeeEnabled)
+					|| ImGui::Checkbox("env NEE (MIS)", &sEnvNeeEnabled)
+					|| ImGui::Checkbox("manifold NEE", &sManifoldNeeEnabled)
+					|| ImGui::Checkbox("regir", &sRegirEnabled)
 				);
-				// only env lighting
+				if (sRegirEnabled) {
+					ImGui::SliderInt(
+						"regir max age", &sRegirMaxAge, 0, 1024, "%d frames",
+						ImGuiSliderFlags_Logarithmic
+					);
+					settingsChanged |= (
+						ImGui::Checkbox("regir cell jitter", &sRegirJitter)
+					);
+					ImGui::SetItemTooltip(
+						"nee looks up a random neighbouring cell, hiding cell seams"
+					);
+				}
+				if (sManifoldNeeEnabled) {
+					settingsChanged |= ImGui::DragFloat3(
+						"manifold pointWo", &sManifoldPointWo.x, 0.05f
+					);
+				}
+				{
+					bool const stageMode = sStageRender.tlas.id != 0u;
+					u32 const emitterCount = (
+						stageMode
+							? sStageRender.emitterLightCount
+							: sScene.emitterLightCount
+					);
+					u32 const emitterClipped = (
+						stageMode ? sStageRender.emitterClipped : sScene.emitterClipped
+					);
+					f32 const emitterBuildMs = (
+						stageMode ? sStageRender.emitterBuildMs : sScene.emitterBuildMs
+					);
+					ImGui::Text(
+						"light list: %u entries, %.3f ms", emitterCount, emitterBuildMs
+					);
+					if (emitterClipped > 0u) {
+						ImGui::TextColored(
+							ImVec4(1.0f, 0.5f, 0.2f, 1.0f),
+							"  %u emitters clipped (bsdf-sampled only)",
+							emitterClipped
+						);
+					}
+				}
 				settingsChanged |= (
 					ImGui::Checkbox("env map lighting only", &sEnvMapOnlyMode)
 				);
@@ -2387,7 +3035,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						"env rotation", &sEnvRotation, 0.0f, 6.28318530718f
 					)
 				);
-				// biased -- see GpuGlobalExtended.fireflyClampLuminance
 				settingsChanged |= (
 					ImGui::Checkbox("firefly clamp", &sFireflyClampEnabled)
 				);
@@ -2406,32 +3053,51 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					"%u spp | frame %u | %.1f fps",
 					sAccumFrames, sFrameIndex, ImGui::GetIO().Framerate
 				);
+				ImGui::Checkbox("run in background", &sRunInBackground);
+				ImGui::SetItemTooltip("off: rendering stops while the window is unfocused");
 				ImGui::SeparatorText("camera");
 				if (sFirstPerson) {
 					ImGui::Text(
-						"pos %.2f %.2f %.2f yaw %.3f pitch %.3f speed %.2f",
-						camFp.position.x, camFp.position.y, camFp.position.z,
-						camFp.yaw, camFp.pitch, camController.flySpeedMultiplier
+						"pos %.2f %.2f %.2f",
+						camFp.position.x, camFp.position.y, camFp.position.z
 					);
+					ImGui::Text("yaw %.3f", camFp.yaw);
+					ImGui::Text("pitch %.3f", camFp.pitch);
+					ImGui::Text("speed %.2f", camController.flySpeedMultiplier);
 				} else {
-					ImGui::Text(
-						"azimuth %.3f elevation %.3f distance %.3f fov %.3f",
-						cam.azimuth, cam.elevation, cam.distance, cam.fovY
-					);
+					ImGui::Text("azimuth %.3f", cam.azimuth);
+					ImGui::Text("elevation %.3f", cam.elevation);
+					ImGui::Text("distance %.3f", cam.distance);
 				}
-				ImGui::TextDisabled(
-					sFirstPerson
-						? "tab: orbit | wasd+qe move, drag look, scroll speed"
-						: "tab: first person"
-				);
+				ImGui::TextUnformatted("fov");
 				settingsChanged |= (
-					ImGui::SliderFloat("fov", &cam.fovY, 0.2f, 2.5f)
+					ImGui::SliderFloat("##fov", &cam.fovY, 0.2f, 2.5f)
 				);
 				camFp.fovY = cam.fovY;
+				ImGui::TextUnformatted("lens radius (m)");
+				settingsChanged |= (
+					ImGui::SliderFloat(
+						"##lensradius",
+						&sLensRadius,
+						0.0f,
+						0.1f,
+						"%.4f",
+						ImGuiSliderFlags_Logarithmic
+					)
+				);
+				ImGui::TextUnformatted("focal distance (m)");
+				settingsChanged |= (
+					ImGui::DragFloat(
+						"##focaldistance",
+						&sFocalDistance,
+						0.01f,
+						0.01f,
+						1000.0f,
+						"%.2f"
+					)
+				);
 				ImGui::SeparatorText("render");
 				{
-					// -1 when the current internal resolution matches no
-					// preset (a custom --resolution startup value)
 					i32 resIdx = -1;
 					for (i32 i = 0; i < (i32)IM_ARRAYSIZE(skRenderResPresets); ++i) {
 						if (
@@ -2442,25 +3108,41 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 							break;
 						}
 					}
-					i32 newIdx = resIdx;
-					ImGui::Combo(
-						"resolution",
-						&newIdx,
+					auto const fnPresetLabel = (
 						[](void * data, int idx) -> char const * {
 							return (
 								static_cast<RenderResPreset const *>(data)[idx]
 								.label
 							);
-						},
+						}
+					);
+					i32 newIdx = resIdx;
+					ImGui::TextUnformatted("resolution");
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					ImGui::Combo(
+						"##resolution",
+						&newIdx,
+						fnPresetLabel,
 						(void *)skRenderResPresets,
 						(i32)IM_ARRAYSIZE(skRenderResPresets)
 					);
+					ImGui::TextUnformatted("render resolution");
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					if (
+						ImGui::Combo(
+							"##render resolution",
+							&sRenderBudgetIdx,
+							fnPresetLabel,
+							(void *)skRenderResPresets,
+							(i32)IM_ARRAYSIZE(skRenderResPresets)
+						)
+					) {
+						sPathBudgetOverride = 0u;
+						settingsChanged = true;
+					}
 					if (newIdx != resIdx && newIdx >= 0) {
 						sRenderW = skRenderResPresets[newIdx].w;
 						sRenderH = skRenderResPresets[newIdx].h;
-						// waits for device idle and resizes every transient
-						// image in place; the accumulation buffer is a
-						// persistent image, so it is recreated by hand
 						vkof::render_extent_set(sRenderW, sRenderH);
 						vkof::image_destroy(ptAccumImage);
 						fnCreateAccumImage();
@@ -2468,6 +3150,8 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						vkof::image_destroy(gbufferNorImage);
 						vkof::image_destroy(gbufferAlbedoImage);
 						fnCreateGbufferImages();
+						vkof::buffer_destroy(manifoldBendPointBuffer);
+						fnCreateManifoldBendPoints();
 						vkof::image_destroy(denoisePingImage);
 						vkof::image_destroy(denoisePongImage);
 						fnCreateDenoiseImages();
@@ -2479,17 +3163,91 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						settingsChanged = true;
 					}
 				}
-				ImGui::SliderFloat("exposure", &sExposure, 0.01f, 8.0f);
+				// the firefly clamp scales with exposure, so samples change
+				if (
+					ImGui::SliderFloat(
+						"exposure",
+						&sExposure,
+						0.01f,
+						256.0f,
+						"%.2f", ImGuiSliderFlags_Logarithmic
+					)
+					&& sFireflyClampEnabled
+				) {
+					settingsChanged = true;
+				}
 				settingsChanged |= (
 					ImGui::Checkbox("antialias", &sAntialias)
 				);
-				// deliberately not part of settingsChanged: the denoiser
-				// only filters ptOutputTarget for display (pt-denoise.comp),
-				// it never writes ptAccumImage, so toggling it has nothing
-				// to invalidate -- the next frame just runs with or without
-				// the filter nodes
+				settingsChanged |= ImGui::Checkbox("spectral", &sSpectral);
 				ImGui::Checkbox("denoise (a-trous)", &sDenoiseEnabled);
-				// also just a display filter, same reasoning as denoise above
+				{
+					bool const rrSupported = ponder::dlss_rr_supported();
+					ImGui::BeginDisabled(!rrSupported);
+					settingsChanged |= (
+						ImGui::Checkbox("DLSS-RR (realtime)", &sDlssRrEnabled)
+					);
+					ImGui::EndDisabled();
+					if (!rrSupported) {
+						ImGui::SameLine();
+						ImGui::TextDisabled(
+							"(%s)", ponder::dlss_rr_unsupported_reason()
+						);
+					}
+					if (sDlssRrEnabled) {
+						constexpr char const * skPresetLabels[] = {
+							"default", "D", "E", "F",
+						};
+						constexpr ponder::DlssRrPreset skPresets[] = {
+							ponder::DlssRrPreset::Default,
+							ponder::DlssRrPreset::D,
+							ponder::DlssRrPreset::E,
+							ponder::DlssRrPreset::F,
+						};
+						i32 presetIndex = 0;
+						for (i32 i = 0; i < 4; ++i) {
+							if (skPresets[i] == sDlssRrPreset) { presetIndex = i; }
+						}
+						if (
+							ImGui::Combo(
+								"preset##dlssrr", &presetIndex, skPresetLabels, 4
+							)
+						) {
+							sDlssRrPreset = skPresets[presetIndex];
+						}
+						constexpr char const * skQualityLabels[] = {
+							"DLAA", "quality", "balanced", "performance",
+							"ultra performance",
+						};
+						constexpr ponder::DlssRrQuality skQualities[] = {
+							ponder::DlssRrQuality::Dlaa,
+							ponder::DlssRrQuality::Quality,
+							ponder::DlssRrQuality::Balanced,
+							ponder::DlssRrQuality::Performance,
+							ponder::DlssRrQuality::UltraPerformance,
+						};
+						i32 qualityIndex = 0;
+						for (i32 i = 0; i < 5; ++i) {
+							if (skQualities[i] == sDlssRrQuality) { qualityIndex = i; }
+						}
+						if (
+							ImGui::Combo(
+								"upscale##dlssrr", &qualityIndex, skQualityLabels, 5
+							)
+						) {
+							sDlssRrQuality = skQualities[qualityIndex];
+						}
+						ImGui::TextDisabled(
+							"traces %ux%u", sTraceSize.x, sTraceSize.y
+						);
+						if (sDlssRr.evaluateFailed) {
+							ImGui::TextColored(
+								ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+								"RR evaluate failed, see the log"
+							);
+						}
+					}
+				}
 				ImGui::Checkbox("bloom", &sBloomEnabled);
 				if (sBloomEnabled) {
 					ImGui::SliderFloat(
@@ -2504,11 +3262,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					sMaxSpp == 0 ? "0 (unlimited)" : "%d"
 				);
 				if (sMaxSpp > 0) {
-					// gpu-side completion tally (pt-accumulate.comp's
-					// atomicAdd): each pixel bumps it once, on the frame it
-					// reaches the max-spp target, so a finished render reads
-					// renderWidth * renderHeight. read off the host mapping a
-					// frame or so stale, fine for a progress display
 					u32 const completedPixels = fnCompletedPixels();
 					u32 const totalPixels = sRenderW * sRenderH;
 					char overlay[64];
@@ -2524,50 +3277,24 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						overlay
 					);
 				}
-				// deliberately not part of settingsChanged: accumulation is
-				// rate-independent, so toggling the budget or moving the
-				// target mid-run just changes how fast tiles refresh
 				ImGui::Checkbox("frame budget", &sBudgetEnabled);
 				if (sBudgetEnabled) {
 					ImGui::SliderFloat(
 						"target ms", &sBudgetTargetMs, 1.0f, 64.0f, "%.1f ms"
 					);
-					ImGui::SliderInt(
-						"hold spp", &sTileWindowSpp, 1, 256
-					);
-					u32 const budgetTileTotal = (
-						((sRenderW + kPtTileSize - 1u) / kPtTileSize)
-						* ((sRenderH + kPtTileSize - 1u) / kPtTileSize)
-					);
-					ImGui::Text(
-						"resolve %.2f ms\n%u / %u tiles",
-						sResolveMsLast, sTileKLast, budgetTileTotal
-					);
 				}
-				// not settingsChanged either: the focus region only redirects
-				// which tiles refresh, accumulation everywhere stays valid
-				ImGui::Checkbox(
-					"focus region (right-click drag)", &sFocusMode
-				);
 				if (sFocusActive) {
-					ImGui::SameLine();
 					if (ImGui::SmallButton("clear region")) {
 						sFocusActive = false;
 					}
-					u32 const gridW = (
-						(sRenderW + kPtTileSize - 1u) / kPtTileSize
-					);
-					u32 const gridH = (
-						(sRenderH + kPtTileSize - 1u) / kPtTileSize
-					);
-					FocusTileBounds const b = fnFocusTileBounds(gridW, gridH);
+					ponder::WavefrontRegion const r = fnFocusRegion();
 					ImGui::Text(
-						"focused %u x %u tiles (outside pixels frozen)",
-						b.x1 - b.x0 + 1u, b.y1 - b.y0 + 1u
+						"focused %u x %u px (outside pixels frozen)",
+						r.extent.x, r.extent.y
 					);
-				} else if (sFocusMode) {
+				} else {
 					ImGui::TextDisabled(
-						"right-click drag the view to set a region"
+						"hold v + left-drag: focus region, v + right-click: clear"
 					);
 				}
 				if (ImGui::Button("screenshot")) {
@@ -2602,6 +3329,23 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						);
 					}
 				}
+				if (sManifoldNeeEnabled) {
+					u32 const * const manifoldCounts = (
+						reinterpret_cast<u32 const *>(
+							vkof::buffer_host_address(manifoldCountsBuffer).ptr()
+						)
+					);
+					u32 const attempted = manifoldCounts[0];
+					f32 const rate = (
+						attempted > 0u
+							? 100.0f * f32(manifoldCounts[1]) / f32(attempted)
+							: 0.0f
+					);
+					ImGui::Text(
+						"manifold: %u seeds, %.1f%% converged, %u left surface",
+						attempted, (f64)rate, manifoldCounts[2]
+					);
+				}
 				bool const openMaterialPopup = sMaterialPopupPending;
 				sMaterialPopupPending = false;
 				for (std::string const & msg : sProbeMessages) {
@@ -2610,31 +3354,442 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					);
 				}
 				ImGui::End();
-				// OpenPopup/BeginPopup must share the same id-stack context;
-				// calling OpenPopup while still inside a window hashes the id
-				// against that window's stack, which BeginPopup below never
-				// matches
+
+				ImGui::Begin("Blackhole");
+				settingsChanged |= (
+					ImGui::Checkbox("enabled##blackhole", &sBlackholeEnabled)
+				);
+				if (sBlackholeEnabled) {
+					f32 const extent = fnActiveBoundsExtent();
+					if (ImGui::Button("place in view##blackhole")) {
+						f32v3 const eye = (
+							sFirstPerson
+							? camFp.position
+							: srat::camera_orbit_eye(cam)
+						);
+						f32v3 const target = (
+							sFirstPerson
+							? camFp.position + srat::camera_fp_forward(camFp) * extent
+							: cam.target
+						);
+						sBlackholeOri = eye + (target - eye) * 0.5f;
+						sBlackholeMass = extent * 0.02f;
+						settingsChanged = true;
+					}
+					settingsChanged |= (
+						ImGui::DragFloat3(
+							"position##blackhole",
+							&sBlackholeOri.x,
+							extent * 0.01f
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"mass (m)##blackhole",
+							&sBlackholeMass,
+							extent * 0.001f,
+							0.0f,
+							extent,
+							"%.5f"
+						)
+					);
+					settingsChanged |= (
+						ImGui::SliderFloat(
+							"spin (a/M)##blackhole",
+							&sBlackholeSpin,
+							-0.998f,
+							0.998f,
+							"%.3f"
+						)
+					);
+
+					ImGui::SeparatorText("integration");
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"lens radius (M)##blackhole",
+							&sBlackholeLensRadius,
+							10.0f,
+							10.0f,
+							100000.0f,
+							"%.0f"
+						)
+					);
+					settingsChanged |= (
+						ImGui::SliderInt(
+							"max chords##blackhole",
+							&sBlackholeMaxChords,
+							16,
+							4096
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"step factor##blackhole",
+							&sBlackholeStepFactor,
+							0.001f,
+							0.005f,
+							0.5f,
+							"%.3f"
+						)
+					);
+
+					ImGui::SeparatorText("disk");
+					settingsChanged |= (
+						ImGui::Checkbox("enabled##blackholedisk", &sBlackholeDiskEnabled)
+					);
+					if (sBlackholeDiskEnabled) {
+						settingsChanged |= (
+							ImGui::DragFloatRange2(
+								"radii (M)##blackholedisk",
+								&sBlackholeDiskInnerRadius,
+								&sBlackholeDiskOuterRadius,
+								0.1f,
+								2.0f,
+								200.0f,
+								"%.1f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"temperature (K)##blackholedisk",
+								&sBlackholeDiskTemperature,
+								50.0f,
+								1000.0f,
+								100000.0f,
+								"%.0f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"brightness##blackholedisk",
+								&sBlackholeDiskBrightness,
+								0.01f,
+								0.0f,
+								100.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"optical depth##blackholedisk",
+								&sBlackholeDiskOpticalDepth,
+								0.05f,
+								0.0f,
+								100.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"optical depth falloff##blackholedisk",
+								&sBlackholeDiskOpticalDepthExponent,
+								0.01f,
+								0.0f,
+								8.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::Checkbox(
+								"prograde##blackholedisk",
+								&sBlackholeDiskPrograde
+							)
+						);
+
+						ImGui::SeparatorText("disk animation");
+						ImGui::Checkbox("animate##blackholedisk", &sBlackholeDiskAnimate);
+						ImGui::DragFloat(
+							"inner orbits per second##blackholedisk",
+							&sBlackholeDiskOrbitsPerSecond,
+							0.01f,
+							0.0f,
+							10.0f,
+							"%.2f"
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"shutter (s)##blackholedisk",
+								&sShutterSeconds,
+								0.01f,
+								0.0f,
+								10.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"noise amplitude##blackholedisk",
+								&sBlackholeDiskNoiseAmplitude,
+								0.01f,
+								0.0f,
+								1.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"noise scale##blackholedisk",
+								&sBlackholeDiskNoiseScale,
+								0.05f,
+								0.1f,
+								64.0f,
+								"%.2f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"hotspot radius (M)##blackholedisk",
+								&sBlackholeDiskHotspotRadius,
+								0.1f,
+								2.0f,
+								200.0f,
+								"%.1f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"hotspot temperature (K)##blackholedisk",
+								&sBlackholeDiskHotspotTemperature,
+								50.0f,
+								0.0f,
+								100000.0f,
+								"%.0f"
+							)
+						);
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"hotspot size (M)##blackholedisk",
+								&sBlackholeDiskHotspotSize,
+								0.05f,
+								0.05f,
+								50.0f,
+								"%.2f"
+							)
+						);
+					}
+				}
+				ImGui::End();
+
+				ImGui::Begin("Ambient medium");
+				{
+					char const * const ambientMediumTypes[] = {
+						"none", "homogeneous", "height fog",
+					};
+					settingsChanged |= (
+						ImGui::Combo(
+							"type##ambientMedium",
+							&sAmbientMediumType,
+							ambientMediumTypes,
+							IM_ARRAYSIZE(ambientMediumTypes)
+						)
+					);
+					if (sAmbientMediumType != (i32)ponder::WavefrontAmbientMediumType::None) {
+						settingsChanged |= (
+							ImGui::DragFloat(
+								"density##ambientMedium",
+								&sAmbientMediumDensity,
+								0.0005f,
+								0.0f,
+								10.0f,
+								"%.4f"
+							)
+						);
+						ImGui::TextUnformatted("scattering (σs per meter)");
+						ImGui::SetNextItemWidth(-FLT_MIN);
+						settingsChanged |= (
+							ImGui::ColorEdit3(
+								"##ambientMediumscattering",
+								&sAmbientMediumScattering.x,
+								ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR
+							)
+						);
+						ImGui::TextUnformatted("absorption (σa per meter)");
+						ImGui::SetNextItemWidth(-FLT_MIN);
+						settingsChanged |= (
+							ImGui::ColorEdit3(
+								"##ambientMediumabsorption",
+								&sAmbientMediumAbsorption.x,
+								ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR
+							)
+						);
+
+						ImGui::SeparatorText("phase");
+						char const * const ambientMediumPhases[] = {
+							"henyey-greenstein", "draine", "fog (droplets)",
+						};
+						settingsChanged |= (
+							ImGui::Combo(
+								"##ambientMediumphase",
+								&sAmbientMediumPhase,
+								ambientMediumPhases,
+								IM_ARRAYSIZE(ambientMediumPhases)
+							)
+						);
+						if (
+							sAmbientMediumPhase
+							!= (i32)ponder::WavefrontAmbientMediumPhase::Fog
+						) {
+							settingsChanged |= (
+								ImGui::SliderFloat(
+									"g##ambientMedium", &sAmbientMediumAnisotropy, -0.99f, 0.99f
+								)
+							);
+						}
+						if (
+							sAmbientMediumPhase
+							== (i32)ponder::WavefrontAmbientMediumPhase::Draine
+						) {
+							settingsChanged |= (
+								ImGui::SliderFloat(
+									"α##ambientMedium", &sAmbientMediumDraineAlpha, 0.0f, 50.0f
+								)
+							);
+						}
+						if (
+							sAmbientMediumPhase
+							== (i32)ponder::WavefrontAmbientMediumPhase::Fog
+						) {
+							ImGui::TextUnformatted("droplet diameter (µm)");
+							ImGui::SetNextItemWidth(-FLT_MIN);
+							settingsChanged |= (
+								ImGui::SliderFloat(
+									"##ambientMediumdroplet",
+									&sAmbientMediumDropletDiameter,
+									5.0f,
+									50.0f
+								)
+							);
+						}
+
+						if (sAmbientMediumType == (i32)ponder::WavefrontAmbientMediumType::HeightFog) {
+							ImGui::SeparatorText("height");
+							settingsChanged |= (
+								ImGui::DragFloat(
+									"origin##ambientMedium", &sAmbientMediumHeightOrigin, 0.05f
+								)
+							);
+							settingsChanged |= (
+								ImGui::DragFloat(
+									"falloff##ambientMedium",
+									&sAmbientMediumHeightFalloff,
+									0.05f,
+									0.01f,
+									1000.0f
+								)
+							);
+						}
+					}
+				}
+				if (ImGui::CollapsingHeader("ground heating")) {
+					settingsChanged |= (
+						ImGui::Checkbox("enabled##groundHeating", &sGroundHeatingEnabled)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"ground height##groundHeating",
+							&sGroundHeatingGroundHeight,
+							0.05f
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"haze height##groundHeating",
+							&sGroundHeatingHazeHeight,
+							0.05f,
+							0.001f,
+							1000.0f
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"gradient##groundHeating",
+							&sGroundHeatingGradient,
+							0.0001f,
+							0.0f,
+							1.0f,
+							"%.5f"
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"noise amplitude##groundHeating",
+							&sGroundHeatingNoiseAmplitude,
+							0.0001f,
+							0.0f,
+							1.0f,
+							"%.5f"
+						)
+					);
+					settingsChanged |= (
+						ImGui::DragFloat(
+							"noise scale##groundHeating",
+							&sGroundHeatingNoiseScale,
+							0.01f,
+							0.01f,
+							100.0f
+						)
+					);
+				}
+				ImGui::End();
 				if (openMaterialPopup) {
+					ImGui::OpenPopup("material inspector");
+				}
+
+				// -- every material of the scene, by model
+				std::vector<ponder::MaterialMediaEntry> materialEntries;
+				auto const fnAddMaterials = [&](
+					i32 const modelDrawIndex,
+					std::string const & modelName,
+					mor::Scene const & scene
+				) {
+					u32 const count = mor::scene_material_count(scene);
+					for (u32 m = 0u; m < count; ++m) {
+						materialEntries.emplace_back(ponder::MaterialMediaEntry {
+							.modelDrawIndex = modelDrawIndex,
+							.materialIndex = (i32)m,
+							.modelName = modelName,
+							.materialName = mor::scene_material_name(scene, m),
+						});
+					}
+				};
+				if (sMode == ViewerMode::StageEdit) {
+					auto const & instances = sStageRender.modelDrawIndexToInstance;
+					for (usize i = 0u; i < instances.size(); ++i) {
+						stage::GltfInstance const & instance = (
+							sStage.gltfInstances[instances[i]]
+						);
+						stage::GltfModel const & model = (
+							sStage.gltfModels[instance.modelIndex]
+						);
+						fnAddMaterials(
+							(i32)i,
+							instance.name,
+							sStage.gltfMeshes[model.meshIndex].scene
+						);
+					}
+				} else if (sScene.blas.id != 0u) {
+					fnAddMaterials(
+						0,
+						std::filesystem::path(sCurrentModelPath).filename().string(),
+						sScene.scene
+					);
+				}
+				if (
+					ponder::material_media_list_imgui(
+						sMaterialMedia,
+						materialEntries,
+						sPickedModelDrawIndex,
+						sPickedMaterialIndex
+					)
+				) {
 					ImGui::OpenPopup("material inspector");
 				}
 			}
 			if (sMode == ViewerMode::StageEdit) {
-				// the render fills the whole glfw window (no embedded 3d
-				// viewport sub-region), same assumption the probe-pixel
-				// mouse mapping above already makes
 				i32 windowW = 0, windowH = 0;
 				glfwGetWindowSize(window, &windowW, &windowH);
 
-				// -- drag a model from stage_imgui_edit's "gltf models"
-				// panel directly into the 3d view to place a new instance.
-				// an invisible window covering the whole viewport, existing
-				// ONLY while a compatible drag is actually in flight
-				// (GetDragDropPayload() gates this) -- deliberately no
-				// ImGuiWindowFlags_NoInputs, since that would also disable
-				// drag-drop hit-testing; safe without it because this
-				// window only ever exists for the duration of an already-
-				// active ImGui drag, which already owns mouse input for
-				// that duration regardless of this window
+				// -- model drag
 				if (ImGui::GetDragDropPayload() != nullptr) {
 					ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
 					ImGui::SetNextWindowSize(ImVec2((f32)windowW, (f32)windowH));
@@ -2647,19 +3802,8 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						| ImGuiWindowFlags_NoBringToFrontOnFocus
 						| ImGuiWindowFlags_NoNav
 					);
-					// BeginDragDropTarget() attaches to the LAST SUBMITTED
-					// ITEM, not automatically to the enclosing window -- with
-					// no item at all, it has nothing to hook onto (silently
-					// finds no target) regardless of the window covering the
-					// whole viewport. Dummy() submits one filling the window
 					ImGui::Dummy(ImGui::GetContentRegionAvail());
 					if (ImGui::BeginDragDropTarget()) {
-						// new instance at the camera's current orbit pivot --
-						// a much more useful default than the world origin,
-						// which is often off-screen depending on the scene;
-						// drag it into its final position afterward with the
-						// usual gizmo/transform window, same as any other
-						// newly-added instance
 						stage::Transform const dropTransform {
 							.position = cam.target,
 						};
@@ -2685,32 +3829,21 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						? srat::camera_fp_proj(camFp)
 						: srat::camera_orbit_proj(cam)
 				);
-				// f32m44_perspective bakes in a y-flip for vulkan's clip
-				// space (see srat/core-math.hpp); ImGuizmo's own screen-
-				// space math assumes the opengl convention it was written
-				// against, so handing it the real (vulkan) projection
-				// double-flips y relative to what's actually on screen --
-				// the gizmo tracks the wrong screen position and drifts
-				// off-screen as the camera moves. undo just that one term
-				// for the copy imguizmo sees; the real proj used for
-				// rendering (view/proj above, and everywhere else) is
-				// untouched
 				gizmoProj.m[5] = -gizmoProj.m[5];
 				gizmoUsed = stage::stage_imgui_gizmo_edit(
 					sStage, view, gizmoProj,
 					f32v4 { 0.0f, 0.0f, (f32)windowW, (f32)windowH }
 				);
 				if (gizmoUsed) {
-					stage_render_rebuild_tlas(sStageRender, sStage);
+					stage_render_rebuild_tlas(
+						sStageRender, sStage, sMeshNeeEnabled, environment_light_power()
+					);
 					settingsChanged = true;
 				}
 			}
 			if (ImGui::BeginPopup("material inspector")) {
 				bool matChanged = false;
 				if (sMode == ViewerMode::StageEdit) {
-					// stage_imgui_material_inspector applies + uploads
-					// internally (it's the same path as any other stage
-					// material edit), unlike file view's below
 					if (
 						sPickedModelDrawIndex >= 0
 						&& (usize)sPickedModelDrawIndex
@@ -2733,21 +3866,21 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						mor::scene_gpu_materials_upload(sScene.materialsOverride);
 					}
 				}
+				matChanged |= (
+					ponder::material_media_imgui(
+						sMaterialMedia, sPickedModelDrawIndex, sPickedMaterialIndex
+					)
+				);
 				if (matChanged) {
 					settingsChanged = true;
 				}
 				ImGui::EndPopup();
 			}
 
-			// -- environment map switch, deferred out of the imgui scope like
-			// the model switch below (the load waits for device idle and
-			// executes its own upload work)
+			// -- environment map switch
 			if (!pendingEnvMapPath.empty()) {
 				settingsChanged |= fnLoadEnvMap(pendingEnvMapPath);
 			}
-			// hdrmap mode with nothing resident (just selected in the ui, or
-			// the picked file failed to load): try each scanned map in order,
-			// fall back to furnace if none loads
 			if (sEnvMode == 3 && sEnvTables.width == 0u) {
 				for (ponder::ModelEntry const & entry : sEnvMapList) {
 					if (fnLoadEnvMap(entry.path.string())) {
@@ -2763,9 +3896,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				settingsChanged = true;
 			}
 
-			// file view only ever shows one asset at a time now -- loading a
-			// model auto-unloads any active vdb and vice versa (stage mode
-			// is where more than one thing at once belongs)
 			if (!pendingLoadPath.empty() && !sCurrentVdbPath.empty()) {
 				pendingUnloadVdb = true;
 			}
@@ -2773,10 +3903,16 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				pendingUnloadModel = true;
 			}
 
-			// -- model switch: tear down every piece of scene state and
-			// rebuild from the file; the libraries are rescanned so new files
-			// under the settings.json paths show up without a restart
+			// the pass in flight and the regir cells index the old scene
+			auto const fnSceneReplaced = [&]() {
+				ponder::wavefront_pass_restart(wavefront);
+				ponder::regir_clear(regir);
+			};
+
+			// -- model switch
 			if (!pendingLoadPath.empty()) {
+				sMaterialMedia.media.clear();
+				ponder::material_media_upload(sMaterialMedia);
 				scene_state_destroy(sScene);
 				sModelList = ponder::scan_asset_paths(
 					settingsPath, { "modelPaths" }, { ".gltf", ".glb" },
@@ -2788,26 +3924,23 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				);
 				sCurrentModelPath = pendingLoadPath;
 				sScene = scene_state_create(sCurrentModelPath.c_str());
+				fnSceneReplaced();
 				if (sScene.blas.id == 0u) {
 					break;
 				}
-				// re-fit framing to the new bounds; the orbit orientation
-				// (azimuth/elevation) is the one piece of camera state kept
 				fnReframeCamera(cam);
-				// snap first-person to the reframed orbit too, so a model
-				// load doesn't leave the camera at the old model's scale and
-				// position
 				ponder::camera_controller_sync_fp_from_orbit(camController);
 				settingsChanged = true;
 			}
 
-			// -- model unload: back to the empty scene (zero-instance tlas,
-			// every ray reaches the environment); a loaded vdb stays and
-			// takes over the camera framing
+			// -- model unload
 			if (pendingUnloadModel) {
+				sMaterialMedia.media.clear();
+				ponder::material_media_upload(sMaterialMedia);
 				scene_state_destroy(sScene);
 				sCurrentModelPath.clear();
 				sScene = scene_state_create(nullptr);
+				fnSceneReplaced();
 				if (!sVdb.blob.empty()) {
 					vdb_bounds(
 						sVdb, sScene.boundsCenter, sScene.boundsExtent
@@ -2818,9 +3951,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				settingsChanged = true;
 			}
 
-			// -- vdb switch/unload: one grid per scene for now, torn down
-			// wholesale like a model switch. the old buffer may still be
-			// referenced by in-flight frames, so idle before destroying
+			// -- vdb switch/unload
 			if (pendingUnloadVdb || !pendingVdbPath.empty()) {
 				vkof::device_wait_idle();
 				if (sVdb.gpuBuffer.id != 0u) {
@@ -2839,8 +3970,6 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				sVdbTemperature = {};
 				sCurrentVdbPath.clear();
 				if (!pendingVdbPath.empty()) {
-					// openvdb throws on unreadable files; a failed pick
-					// should drop back to no-vdb, not kill the viewer
 					try {
 						sVdb = ponder::vdb_load(pendingVdbPath.c_str());
 					} catch (std::exception const & e) {
@@ -2852,17 +3981,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					if (sVdb.gpuBuffer.id != 0u) {
 						sCurrentVdbPath = pendingVdbPath;
 					}
-					// independent of whether "density" loaded above -- a
-					// fire-only vdb can have "temperature" with no density
-					// grid at all
 					fnLoadVdbTemperatureIfPresent(pendingVdbPath.c_str());
 					sVdbList = ponder::scan_asset_paths(
 						settingsPath, { "vdbPaths" }, { ".vdb" },
 						/*warnMissingKey=*/false
 					);
 				}
-				// with no mesh in the scene the grid owns the framing, same
-				// as the vdb-only startup path
 				if (sCurrentModelPath.empty() && !sVdb.blob.empty()) {
 					vdb_bounds(
 						sVdb, sScene.boundsCenter, sScene.boundsExtent
@@ -2873,15 +3997,16 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				settingsChanged = true;
 			}
 
-			// -- new stage: an empty, unsaved stage; leaves file view's own
-			// scene/vdb alone (they're simply not rendered while in stage
-			// mode -- see the mode-gated buffer selection above)
+			// -- new stage
 			if (pendingNewStage) {
 				sMode = ViewerMode::StageEdit;
 				sStage = stage::Stage {};
 				sStage.environment.mode = stage::EnvironmentMode::Furnace;
 				stage_render_rebuild_blases(sStageRender, sStage);
-				stage_render_rebuild_tlas(sStageRender, sStage);
+				stage_render_rebuild_tlas(
+					sStageRender, sStage, sMeshNeeEnabled, environment_light_power()
+				);
+				fnSceneReplaced();
 				sStagePathBuffer[0] = '\0';
 				fnApplyStageEnvironment();
 				fnReframeCamera(cam);
@@ -2904,7 +4029,13 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 					sMode = ViewerMode::StageEdit;
 					sStage = std::move(loaded);
 					stage_render_rebuild_blases(sStageRender, sStage);
-					stage_render_rebuild_tlas(sStageRender, sStage);
+					stage_render_rebuild_tlas(
+						sStageRender,
+						sStage,
+						sMeshNeeEnabled,
+						environment_light_power()
+					);
+					fnSceneReplaced();
 					std::strncpy(
 						sStagePathBuffer, pendingOpenStagePath.c_str(),
 						sizeof(sStagePathBuffer) - 1
@@ -2916,8 +4047,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 			}
 
-			// -- save stage: only reachable in stage mode (the button lives
-			// there); writes to whatever path is currently in the buffer
+			// -- save stage
 			if (pendingSaveStage) {
 				if (sStagePathBuffer[0] == '\0') {
 					printf("no save path set\n");
@@ -2926,27 +4056,19 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 			}
 
-			// -- unload stage: tear down every stage-owned gpu resource and
-			// drop back to file view; file view's own sScene/sVdb were never
-			// touched while in stage mode, so there's nothing to reload.
-			// stage_render_destroy frees sStageRender.tlas, which was the
-			// bound acceleration structure this whole time (stage mode
-			// rebinds to its own tlas on entry) -- rebind sScene's own tlas
-			// immediately after, or the very next frame traces a ray query
-			// against a freed handle
+			// -- unload stage
 			if (pendingUnloadStage) {
 				stage_render_destroy(sStageRender);
 				stage::stage_destroy(sStage);
 				vkof::acceleration_structure_set_tlas(sScene.tlas);
 				sMode = ViewerMode::FileView;
+				fnSceneReplaced();
 				fnReframeCamera(cam);
 				ponder::camera_controller_sync_fp_from_orbit(camController);
 				settingsChanged = true;
 			}
 
-			// -- add instance: append, then rebuild both the blas list
-			// (structural change) and the tlas (so the new instance actually
-			// renders this frame)
+			// -- add instance
 			if (!pendingAddGltfPath.empty()) {
 				if (
 					stage::stage_add_gltf_model(sStage, pendingAddGltfPath.c_str())
@@ -2973,15 +4095,12 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				}
 			}
 
-			// every path that can change sStage.gltfInstances's size (outliner
-			// delete, models-panel drag-drop, file-picker add above) funnels
-			// through this one flag rather than rebuilding immediately at the
-			// point of mutation -- see gltfInstanceCountChanged's declaration
-			// comment for why the rebuild itself must happen out here, after
-			// the "viewer" window's ImGui::End() has already run
 			if (gltfInstanceCountChanged) {
 				stage_render_rebuild_blases(sStageRender, sStage);
-				stage_render_rebuild_tlas(sStageRender, sStage);
+				stage_render_rebuild_tlas(
+					sStageRender, sStage, sMeshNeeEnabled, environment_light_power()
+				);
+				fnSceneReplaced();
 				stageInstancesChanged = false;
 				settingsChanged = true;
 			}
@@ -2989,21 +4108,14 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				stage::stage_flush_pending_gpu_destroys(sStage);
 			}
 
-			// stage_imgui_edit's own edits (transform drags, visibility
-			// toggles, material overrides, light/camera fields) don't touch
-			// the instance list itself, only need the tlas + models-
-			// indirect buffer refreshed to match -- unless a full rebuild
-			// above already covered it this frame
 			if (stageInstancesChanged) {
-				stage_render_rebuild_tlas(sStageRender, sStage);
+				stage_render_rebuild_tlas(
+					sStageRender, sStage, sMeshNeeEnabled, environment_light_power()
+				);
+				fnSceneReplaced();
 				settingsChanged = true;
 			}
 
-			// mirror the live (shared, file-view-style) environment state
-			// into sStage.environment every frame while in stage mode, so
-			// "save stage" always persists whatever's currently live --
-			// there's no separate stage-side environment editor to keep in
-			// sync from instead (see fnApplyStageEnvironment's comment)
 			if (sMode == ViewerMode::StageEdit) {
 				sStage.environment.mode = (stage::EnvironmentMode)sEnvMode;
 				sStage.environment.path = sCurrentEnvMapPath;
@@ -3011,10 +4123,24 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				sStage.environment.intensity = sEnvIntensity;
 			}
 
-			// -- focus: a gltf instance's "focus" button (stage_imgui_edit)
-			// re-frames the orbit camera to that instance's world bounds,
-			// same math as fnReframeCamera but against the clicked
-			// instance's bounds instead of the whole active scene's
+			// -- focus
+			{
+				f32v3 center;
+				f32 extent;
+				if (ponder::debug_path_focus(sDebugPath, center, extent)) {
+					focusRequest.requested = true;
+					focusRequest.center = center;
+					focusRequest.extent = extent;
+				}
+				if (
+					sRegirEnabled
+					&& ponder::regir_debug_focus(sRegirDebug, center, extent)
+				) {
+					focusRequest.requested = true;
+					focusRequest.center = center;
+					focusRequest.extent = extent;
+				}
+			}
 			if (focusRequest.requested) {
 				cam.target = focusRequest.center;
 				cam.distance = focusRequest.extent * 1.5f;
@@ -3024,15 +4150,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				settingsChanged = true;
 			}
 
-			// captured before fnUploadFrameState consumes (and clears) the
-			// probe request, so the max-spp freeze path below can still run
-			// resolve.comp for the material inspector
 			bool const probeRequested = sProbePixel.x >= 0;
-			// every reset trigger -- camera/gizmo drags, any settings edit,
-			// startup, shader reload -- goes through View first instead of
-			// forcing an immediate full-screen pathtrace reset: at high
-			// resolutions that single-frame full dispatch is a multi-second
-			// hang, not a hitch
 			bool const otherReset = (
 				settingsChanged || sFrameIndex == 0u || vkof::shader_reloaded()
 			);
@@ -3050,14 +4168,47 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 				sFrameMode = FrameMode::PathTrace;
 			}
 			fnUploadFrameState();
+			if (sBlackholeDiskAnimate) {
+				sBlackholeDiskSeconds = ponder::timeline_seconds(sTimeline);
+			}
+			if (sTimeline.playing && (cameraMoved || gizmoUsed || otherReset)) {
+				sTimeline.frame = 0u;
+			}
+			if (
+				sDebugPath.captured
+				&& sDebugPath.path.sampleIndex != sTimeline.frame
+			) {
+				sDebugPath.capturePending = true;
+			}
+			if (sDebugPath.capturePending) {
+				ponder::wavefront_debug_path_prepare(wavefront);
+			}
 			bool const pathTraceReset = (
-				otherReset && sFrameMode == FrameMode::PathTrace
+				(otherReset || timelineReset) && sFrameMode == FrameMode::PathTrace
 			);
 			bool const freezeAccum = (
 				sFrameMode == FrameMode::PathTrace && !pathTraceReset
 				&& sMaxSpp > 0 && fnCompletedPixels() >= sRenderW * sRenderH
 			);
-			fnRenderFrame(sFrameMode, pathTraceReset, freezeAccum, probeRequested);
+			fnRenderFrame(
+				sFrameMode, pathTraceReset, freezeAccum, probeRequested,
+				/*rrReset=*/otherReset || timelineReset
+			);
+			if (sDebugPath.capturePending) {
+				ponder::wavefront_debug_path_read(wavefront, sDebugPath.path);
+				sDebugPath.capturePending = false;
+				sDebugPath.captured = true;
+			}
+			if (
+				ponder::debug_path_material_pick(
+					sDebugPath, sPickedModelDrawIndex, sPickedMaterialIndex
+				)
+			) {
+				sMaterialPopupPending = true;
+			}
+			if (ponder::debug_path_focus_pick(sDebugPath, sFocalDistance)) {
+				sLensChanged = true;
+			}
 			if (sScreenshotPending) {
 				sScreenshotPending = false;
 				std::filesystem::path const screenshotDir = (
@@ -3080,28 +4231,16 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 						)
 					).string()
 				);
-				// blocks until the gpu is idle, so it captures exactly the
-				// frame rendered above
 				vkof::screenshot(ptAccumImage, outPath.c_str(), sExposure);
 				sLastScreenshotPath = outPath;
 				printf("wrote %s\n", outPath.c_str());
 			}
-			// see sProbeMessages' declaration for why this has to happen
-			// right here rather than in next iteration's imgui block.
-			// probe_reset() (rather than relying on render_graph_execute to
-			// auto-clear) comes right after the copy so the validation
-			// layer's debug-printf readback -- which isn't guaranteed to
-			// land synchronously within the render_graph_execute call whose
-			// fence covers it -- gets the largest possible window to have
-			// arrived before its message is discarded
 			sProbeMessages.clear();
 			for (u32 i = 0u, count = vkof::probe_message_count(); i < count; ++i) {
 				sProbeMessages.emplace_back(vkof::probe_message(i));
 			}
 			vkof::probe_reset();
 
-			// see sMaterialPopupPending's declaration for why this has to
-			// happen right here too, mirroring sProbeMessages above
 			{
 				GpuProbeResult const * const probeResult = (
 					reinterpret_cast<GpuProbeResult const *>(
@@ -3118,6 +4257,7 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		}
 	}
 
+	ponder::material_media_destroy(sMaterialMedia);
 	scene_state_destroy(sScene);
 	if (sVdb.gpuBuffer.id != 0u) {
 		vkof::buffer_destroy(sVdb.gpuBuffer);
@@ -3137,6 +4277,10 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 	vkof::buffer_destroy(nanProbeCounterBuffer);
 	vkof::buffer_destroy(probeResultBuffer);
 	vkof::buffer_destroy(sppCounterBuffer);
+	if (ptAccumImguiId) {
+		vkof::image_imgui_id_destroy(ptAccumImguiId);
+	}
+	vkof::sampler_destroy(magnifierSampler);
 	vkof::image_destroy(ptAccumImage);
 	vkof::image_destroy(gbufferPosImage);
 	vkof::image_destroy(gbufferNorImage);
@@ -3160,8 +4304,16 @@ int32_t main(int32_t const argc, char const * const * const argv) {
 		vkof::buffer_destroy(envMapHandlesBuffer);
 	}
 	vkof::pipeline_destroy(nanCheckPipeline);
+	vkof::pipeline_destroy(manifoldProbePipeline);
+	vkof::pipeline_destroy(manifoldShadePipeline);
+	vkof::buffer_destroy(manifoldCountsBuffer);
+	vkof::buffer_destroy(manifoldCasterBuffer);
+	vkof::buffer_destroy(manifoldBendPointBuffer);
 	vkof::pipeline_destroy(ptAccumulatePipeline);
-	vkof::pipeline_destroy(resolvePipeline);
+	ponder::regir_debug_destroy(sRegirDebug);
+	ponder::regir_destroy(regir);
+	ponder::dlss_rr_destroy(sDlssRr);
+	ponder::wavefront_destroy(wavefront);
 	vkof::shutdown();
 	return 0;
 }

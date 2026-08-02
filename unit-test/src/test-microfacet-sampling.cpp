@@ -107,7 +107,7 @@ std::vector<u32> run_histogram(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_histogram.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_histogram.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -154,7 +154,7 @@ std::vector<f32> run_expected(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "sampling_expected.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/sampling_expected.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -316,7 +316,7 @@ std::vector<f32> run_sweep(
 ) {
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ggx_bounded_sample_sweep.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_sweep.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -394,7 +394,7 @@ TEST_CASE("ggx bounded sampler: normal incidence with xi.y=0 reflects straight u
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	for (u32 i = 0; i < out.size() / 4u; ++i) {
 		CAPTURE(i);
@@ -416,7 +416,7 @@ TEST_CASE("ggx bounded sampler: near-mirror alpha reflects wi about the normal")
 		push7(flat, wi, { 1e-5f, 1e-5f }, { rng.next(), rng.next() * 0.999f });
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	for (u32 i = 0; i < out.size() / 4u; ++i) {
 		CAPTURE(i);
@@ -442,7 +442,7 @@ TEST_CASE("ggx bounded sampler: unit length, pdf > 0 at own samples (isotropic f
 		push7(flat, wi, { alpha, alpha }, { rng.next(), rng.next() });
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	u32 lenFailures = 0u;
 	u32 belowHorizonCount = 0u;
@@ -496,7 +496,7 @@ TEST_CASE("ggx bounded sampler: unit length, pdf > 0 at own samples (anisotropic
 		push7(flat, wi, alpha, { rng.next(), rng.next() });
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	u32 lenFailures = 0u;
 	u32 pdfFailures = 0u;
@@ -562,7 +562,7 @@ TEST_CASE("ggx bounded pdf: integrates to 1 over the sphere (wi above horizon)")
 		flat.push_back(c.alpha.x); flat.push_back(c.alpha.y);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_pdf_integrate.comp", flat, 5u, 1u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_pdf_integrate.slang", flat, 5u, 1u
 	);
 	for (u32 i = 0; i < configs.size(); ++i) {
 		CAPTURE(i);
@@ -595,7 +595,7 @@ TEST_CASE("ggx bounded pdf: integrates to 1 over the sphere (wi below horizon)")
 		flat.push_back(c.alpha.x); flat.push_back(c.alpha.y);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_pdf_integrate.comp", flat, 5u, 1u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_pdf_integrate.slang", flat, 5u, 1u
 	);
 	for (u32 i = 0; i < configs.size(); ++i) {
 		CAPTURE(i);
@@ -698,7 +698,7 @@ TEST_CASE("ggx bounded sampler vs materialx spherical cap: exact match for wi be
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_crosscheck.comp", flat, 7u, 8u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_crosscheck.slang", flat, 7u, 8u
 	);
 	for (u32 i = 0; i < out.size() / 8u; ++i) {
 		CAPTURE(i);
@@ -740,7 +740,7 @@ TEST_CASE("ggx bounded pdf vs materialx vndf pdf: bound-factor ratio (wi above h
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_crosscheck.comp", flat, 7u, 8u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_crosscheck.slang", flat, 7u, 8u
 	);
 	u32 skipped = 0u;
 	for (u32 i = 0; i < cases.size(); ++i) {
@@ -810,10 +810,10 @@ TEST_CASE("ggx bounded iso wrapper: rotation invariance of the pdf") {
 		);
 	}
 	auto const base = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_iso_pdf_evaluate.comp", flatBase, 10u, 1u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_iso_pdf_evaluate.slang", flatBase, 10u, 1u
 	);
 	auto const rotated = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_iso_pdf_evaluate.comp", flatRotated, 10u, 1u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_iso_pdf_evaluate.slang", flatRotated, 10u, 1u
 	);
 	u32 mismatches = 0u;
 	for (u32 i = 0; i < kCount; ++i) {
@@ -873,7 +873,7 @@ TEST_CASE("ggx bounded iso wrapper: valid samples for arbitrary normals") {
 		flat.push_back(rng.next()); flat.push_back(rng.next());
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_iso_sample_evaluate.comp", flat, 9u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_iso_sample_evaluate.slang", flat, 9u, 4u
 	);
 	u32 belowHorizonCount = 0u;
 	u32 lenFailures = 0u;
@@ -989,7 +989,7 @@ TEST_CASE("ggx bounded sampler: cap-cut boundary support flicker (fixed)") {
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	u32 zeroPdf = 0u;
 	for (u32 i = 0; i < out.size() / 4u; ++i) {
@@ -1011,7 +1011,7 @@ TEST_CASE("ggx bounded sampler: degenerate input wi == -nor falls back to the ma
 	push7(flat, { 0.0f, 0.0f, -1.0f }, { 0.5f, 0.5f }, { 0.3f, 0.6f });
 	push7(flat, { 0.0f, 0.0f, -1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f });
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_sample_evaluate.comp", flat, 7u, 4u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_sample_evaluate.slang", flat, 7u, 4u
 	);
 	for (u32 i = 0; i < 2u; ++i) {
 		CAPTURE(i);
@@ -1082,7 +1082,7 @@ TEST_CASE("ggx bounded pdf: sphere-integral heatmap (incidence x alpha)") {
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "ggx_bounded_pdf_integrate.comp", flat, 5u, 1u
+		TEST_SHADER_DIR "slang/entry/ggx_bounded_pdf_integrate.slang", flat, 5u, 1u
 	);
 	std::vector<f32> img(out.size());
 	f64 maxDeviationAbove = 0.0;

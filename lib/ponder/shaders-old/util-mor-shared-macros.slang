@@ -1,0 +1,23 @@
+// autogen from mor-shared.h by
+// lib/tools/shared-header-to-slang.py
+//
+// the function-like macros only. a macro does not cross a
+// module boundary, so a consumer #includes this next to its
+// `import "util-mor-shared"`
+#pragma once
+
+#define MOR_MATERIAL_ALL_PARAMS_WEIGHTS(X) X(GpuMorMaterialComponent1, baseWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, specularWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, transmissionWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, subsurfaceWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, coatWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, fuzzWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, thinFilmWeight, 0.0f, 1.0f); X(GpuMorMaterialComponent1, emissionLuminance, 0.0f, 10000.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_BASE(X) X(GpuMorMaterialComponent3, baseColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, baseMetalness, 0.0f, 1.0f); X(GpuMorMaterialComponent1, baseDiffuseRoughness, 0.0f, 1.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_SPECULAR(X) X(GpuMorMaterialComponent3, specularColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, specularRoughness, 0.0f, 1.0f); X(GpuMorMaterialComponent1, specularRoughnessAnisotropy, 0.0f, 1.0f); X(GpuMorMaterialComponent1, specularRoughnessAnisotropyRotation, 0.0f, 6.28319f); X(GpuMorMaterialComponent1, specularIor, 1.0f, 3.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_TRANSMISSION(X) X(GpuMorMaterialComponent3, transmissionColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, transmissionDepth, 0.0f, 10.0f); X(GpuMorMaterialComponent3, transmissionScatter, 0.0f, 1.0f); X(GpuMorMaterialComponent1, transmissionScatterAnisotropy, -1.0f, 1.0f); X(GpuMorMaterialComponent1, transmissionDispersionScale, 0.0f, 1.0f); X(GpuMorMaterialComponent1, transmissionDispersionAbbeNumber, 9.0f, 91.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_SUBSURFACE(X) X(GpuMorMaterialComponent3, subsurfaceColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, subsurfaceRadius, 0.0f, 10.0f); X(GpuMorMaterialComponent3, subsurfaceRadiusScale, 0.0f, 1.0f); X(GpuMorMaterialComponent1, subsurfaceScatterAnisotropy, -1.0f, 1.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_COAT(X) X(GpuMorMaterialComponent3, coatColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, coatRoughness, 0.0f, 1.0f); X(GpuMorMaterialComponent1, coatRoughnessAnisotropy, 0.0f, 1.0f); X(GpuMorMaterialComponent1, coatIor, 1.0f, 3.0f); X(GpuMorMaterialComponent1, coatDarkening, 0.0f, 1.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_FUZZ(X) X(GpuMorMaterialComponent3, fuzzColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, fuzzRoughness, 0.0f, 1.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_EMISSION(X) X(GpuMorMaterialComponent3, emissionColor, 0.0f, 1.0f); X(GpuMorMaterialComponent1, emissionLuminance, 0.0f, 10000.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_THIN_FILM(X) X(GpuMorMaterialComponent1, thinFilmThickness, 0.0f, 2.0f); X(GpuMorMaterialComponent1, thinFilmIor, 1.0f, 3.0f); 
+#define MOR_MATERIAL_ALL_PARAMS_GEOMETRY(X) X(GpuMorMaterialComponent1, geometryOpacity, 0.0f, 1.0f); X(GpuMorMaterialComponent1, geometryThinWalled, 0.0f, 1.0f);
+#define MOR_MATERIAL_ALL_PARAMS(X) MOR_MATERIAL_ALL_PARAMS_WEIGHTS(X) MOR_MATERIAL_ALL_PARAMS_BASE(X) MOR_MATERIAL_ALL_PARAMS_SPECULAR(X) MOR_MATERIAL_ALL_PARAMS_TRANSMISSION(X) MOR_MATERIAL_ALL_PARAMS_SUBSURFACE(X) MOR_MATERIAL_ALL_PARAMS_COAT(X) MOR_MATERIAL_ALL_PARAMS_FUZZ(X) MOR_MATERIAL_ALL_PARAMS_EMISSION(X) MOR_MATERIAL_ALL_PARAMS_THIN_FILM(X) MOR_MATERIAL_ALL_PARAMS_GEOMETRY(X)
+#define MOR_MATERIAL_ALL_PARAMS_NORMAL(X) X(geometryNormal, rgb, f32v4(0.0f, 0.0f, 1.0f, 0.0f)); X(geometryTangent, rgba, f32v4(1.0f, 0.0f, 0.0f, 0.0f)); X(geometryCoatNormal, rgb, f32v4(0.0f, 0.0f, 1.0f, 0.0f)); X(geometryCoatTangent, rgba, f32v4(1.0f, 0.0f, 0.0f, 0.0f));
+#define MOR_MATERIAL_ALL_TEXTURES_NORMAL(X) X(geometryNormalTexture); X(geometryTangentTexture); X(geometryCoatNormalTexture); X(geometryCoatTangentTexture);
+#define MOR_MATERIAL_ALL_PARAMS_1(X) X(baseWeight); X(baseMetalness); X(baseDiffuseRoughness); X(specularWeight); X(specularRoughness); X(specularRoughnessAnisotropy); X(specularRoughnessAnisotropyRotation); X(specularIor); X(transmissionWeight); X(transmissionDepth); X(transmissionScatterAnisotropy); X(transmissionDispersionScale); X(transmissionDispersionAbbeNumber); X(subsurfaceWeight); X(subsurfaceRadius); X(subsurfaceScatterAnisotropy); X(coatWeight); X(coatRoughness); X(coatRoughnessAnisotropy); X(coatIor); X(coatDarkening); X(fuzzWeight); X(fuzzRoughness); X(emissionLuminance); X(thinFilmWeight); X(thinFilmThickness); X(thinFilmIor); X(geometryOpacity); X(geometryThinWalled);
+#define MOR_MATERIAL_ALL_PARAMS_3(X) X(baseColor); X(specularColor); X(transmissionColor); X(transmissionScatter); X(subsurfaceColor); X(subsurfaceRadiusScale); X(coatColor); X(fuzzColor); X(emissionColor); 

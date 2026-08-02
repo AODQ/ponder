@@ -21,7 +21,7 @@ code style
 ### Formatting
 
 - **Indentation:** tabs.
-- **Brace placement:** opening brace on a new line for `struct`/`class`/`namespaec` bodies. For functions, if parameters break into a new line, the brace can also go on a new line. Otherwise braces always go on same line.
+- **Brace placement:** opening brace on a new line for `namespace` bodies. For functions, if parameters break into a new line, the brace can also go on a new line. Otherwise braces always go on same line.
 - **`const` placement:** east const — `u32 const maxHandles`, `char const * debugName`, `Handle const & handle`.
 - **`const`** ALWAYS **ALWAYS** use const. Add const to everything including function parameters. Treat code as SSA, immutable, etc - except in cases where it makes sense to mutate.
 - The one exception to const is GLSL buffer references, those actually can not be const and will result in compile error

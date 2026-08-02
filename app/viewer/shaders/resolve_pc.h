@@ -29,6 +29,12 @@ struct GpuResolveModelIndirect {
 	VA(GpuFlatIndexBuffer) flatIndices;
 	VA(GpuFlatMeshletBuffer) flatMeshlets;
 	f32m44 modelMatrix;
+	// (TODO REVIEW)
+	// this model's slice of the frame's emitter list; the backward (bsdf-hit)
+	// mis lookup scans only its own model's emitters
+	u32 emitterLightOffset;
+	u32 emitterLightCount;
+	// (TODO REVIEW)
 };
 
 #ifdef __cplusplus

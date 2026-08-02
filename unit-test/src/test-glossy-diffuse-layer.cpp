@@ -60,7 +60,7 @@ std::vector<f32v3> evaluate_layer(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "glossy_diffuse_layer_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/glossy_diffuse_layer_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -130,7 +130,7 @@ std::vector<f32> integrate_layer_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "glossy_diffuse_layer_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/glossy_diffuse_layer_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -193,7 +193,7 @@ std::vector<f32v3> evaluate_eon(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "eon_diffuse_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/eon_diffuse_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -252,7 +252,7 @@ std::vector<f32v3> evaluate_dielectric_specular(std::vector<f32> const & samples
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "dielectric_specular_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/dielectric_specular_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

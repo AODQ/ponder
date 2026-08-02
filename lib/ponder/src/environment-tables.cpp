@@ -242,6 +242,13 @@ ponder::EnvironmentTables ponder::environment_tables_create(
 		.width = (u32)width,
 		.height = (u32)height,
 		.radianceMipCount = radianceMipCount,
+		// (TODO REVIEW)
+		// importance already carries the sin(theta) jacobian per texel, so the
+		// remaining factor is the constant texel footprint (2pi/W)(pi/H)
+		.luminanceIntegral = (
+			totalSum * 2.0f * (f32)(M_PI * M_PI) / (f32)(width * height)
+		),
+		// (TODO REVIEW)
 	};
 	vkof::image_generate_mipmaps(tables.radianceImage);
 	tables.radianceHandle = (

@@ -1,0 +1,5 @@
+{
+  "GpuRegirGuardBuffer": "u32",
+  "GpuRegirCellBuffer": "GpuRegirCell",
+  "GpuRegirReservoirBuffer": "GpuRegirReservoir"
+}

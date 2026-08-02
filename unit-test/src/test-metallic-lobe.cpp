@@ -177,7 +177,7 @@ std::vector<f32v3> evaluate_metal(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "metallic_lobe_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/metallic_lobe_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -239,7 +239,7 @@ std::vector<f32> integrate_metal_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "metallic_lobe_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/metallic_lobe_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -304,7 +304,7 @@ void crosscheck_metal(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "metallic_lobe_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/metallic_lobe_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -118,7 +118,7 @@ TEST_CASE("vdb density: gpu sampling matches cpu nanovdb accessor") {
 	// path for shared/global_pc.h
 	char const * const includePaths[] = { APP_SHADER_DIR, PONDER_SHADER_DIR };
 	auto const pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "vdb_sampling.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/vdb_sampling.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 2u),
 	});
 	REQUIRE(pl.id != 0u);

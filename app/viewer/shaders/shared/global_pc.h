@@ -8,6 +8,15 @@
 #ifdef __cplusplus
 #include <srat/core-math.hpp>
 #include <srat/core-types.hpp>
+#endif
+
+// (TODO REVIEW)
+// GpuEmitterLightBuffer, for the emissive-mesh nee light list below
+#include "emitter-shared.h"
+#include "util-regir-shared.h"
+// (TODO REVIEW)
+
+#ifdef __cplusplus
 #else
 #ifndef f32
 #define i32 int
@@ -69,11 +78,54 @@ struct GpuGlobalExtended {
 	// than hdrmap regardless of this flag
 	u32 envNeeEnabled;
 
-	// diagnostic: terminate every path after its first surface hit (nee's
-	// shadow ray still fires), so e.g. a grid of test spheres can't
-	// cross-light itself -- only the primary ray + nee shadow rays touch
-	// the AS
-	u32 envMapOnlyMode;
+	// (TODO REVIEW)
+	// emissive-mesh next-event estimation (lib/ponder's util-emitter.glsl).
+	// the list is rebuilt every frame, so a material edit stays live; a stale
+	// or empty list only costs variance, never correctness
+	VA(GpuEmitterLightBuffer) emitterLights;
+	u32 emitterLightCount;
+	u32 meshNeeEnabled;
+	// (TODO REVIEW)
+	// nee through a refracting caster, which a straight shadow ray reads as
+	// blocked
+	u32 manifoldNeeEnabled;
+	// (TODO REVIEW)
+	// index of the environment map's entry in that same list, so one
+	// power-weighted pick covers both techniques and one shadow ray serves
+	// both. >= emitterLightCount means the env is not in the list, and the
+	// env nee block falls back to standing on its own with pick pdf 1
+	u32 envLightIndex;
+	// u32 counter array the emissive-nee instrumentation increments; only
+	// read when util-raytrace.glsl is compiled with EMITTER_NEE_DEBUG, which
+	// nothing but the unit tests does. 0 otherwise
+	VA(GpuEmitterNeeDebugBuffer) emitterNeeDebug;
+
+	// (TODO REVIEW)
+	// regir world-space light-selection grid (lib/ponder's util-regir.glsl)
+	// slot claim words; 0 marks an empty slot
+	VA(GpuRegirGuardBuffer) regirGuards;
+	// per-slot key, representative point/normal and normalization factors
+	VA(GpuRegirCellBuffer) regirCells;
+	// skRegirReservoirCount entries per slot
+	VA(GpuRegirReservoirBuffer) regirReservoirs;
+	// table capacity in slots, a power of two
+	u32 regirCellCount;
+	// seeds the fill pass; must advance every frame
+	u32 regirFrameIndex;
+	// world-space cell edge length
+	f32 regirCellSize;
+	u32 regirEnabled;
+	// (TODO REVIEW)
+
+	// (TODO REVIEW)
+	// bounce index from which a bsdf-sampled continuation resolves straight
+	// against the environment instead of tracing the AS; 0 disables it
+	// entirely. 1 is the diagnostic (terminate after the first surface hit,
+	// so e.g. a grid of test spheres can't cross-light itself); 2 is the
+	// camera-drag preview, which keeps one real reflection/refraction
+	// segment before falling back to the env. nee's shadow rays fire either
+	// way
+	u32 envMapOnlyDepth;
 
 	// caps a sample's luminance before it's written out (resolve.comp), so
 	// the rare, very high-variance paths ordinary nee/mis can't reach --
@@ -171,6 +223,16 @@ struct GpuProbeResult {
 #ifdef __cplusplus
 static_assert(sizeof(GpuGlobalPc) == 128, "GpuGlobalPC must be 128 bytes");
 #else
+// (TODO REVIEW)
+// slots: 0 attempts, 1 sampler returned valid, 2 passed the f/cos gate,
+// 3 shadow ray reported occluded, 4 contributed, 5 blocked by emissive
+// geometry, 6 blocked by something else
+#define EMITTER_NEE_DEBUG_SLOTS 7u
+layout(buffer_reference, scalar) buffer GpuEmitterNeeDebugBuffer {
+	u32 data[];
+};
+// (TODO REVIEW)
+
 layout(buffer_reference, scalar) buffer GpuGlobalExtendedBuffer {
 	GpuGlobalExtended data;
 };

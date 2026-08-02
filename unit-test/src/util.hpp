@@ -20,9 +20,46 @@
 namespace test {
 
 // set by main.cpp when vkof-test is launched with --furnace; gates the
-// opt-in full assets/Models furnace sweep in test-furnace-model-render.cpp
+// opt-in full assets/models-categorized furnace sweep in test-furnace-model-render.cpp
 // (159 models is far too slow for the default suite run)
 extern bool furnaceSweepEnabled;
+
+// set by main.cpp when vkof-test is launched with --thorough. the monte-carlo
+// render tests are the suite's whole cost -- each gate gets rendered several
+// times per configuration -- and at the default setting they run at a quarter
+// of the sample count.
+//
+// this does NOT weaken a gate into meaninglessness: every one of them compares
+// a measured delta against a sigma measured from the same renders, so fewer
+// samples widen sigma and the test simply stops resolving sub-percent biases.
+// It keeps catching the percent-and-up breakage that these tests exist for.
+// Use --thorough when chasing a small residual, or before landing.
+extern bool thoroughEnabled;
+
+// sample count for a statistical render gate; pass the thorough (full) value.
+// the default is an eighth of it, which is where nearly all of this suite's gpu
+// cost lives -- these tests render the same scene many times over
+inline u32 statistical_samples(u32 const thoroughCount) {
+	return thoroughEnabled ? thoroughCount : std::max(thoroughCount / 8u, 128u);
+}
+
+// realizations per configuration; sigma is estimated from these, so never go
+// below 4 -- a one- or two-realization spread is a 1-dof estimate that lands
+// anywhere from 0 to ~3x the truth and makes the gate flake on noise rather
+// than fail on bias
+inline u32 statistical_realizations(u32 const thoroughCount) {
+	return (
+		thoroughEnabled ? thoroughCount : std::max(thoroughCount / 2u, 4u)
+	);
+}
+
+// how many sigma a mean-difference gate allows. wider at the default setting:
+// with fewer samples sigma is itself estimated less precisely, and holding 4
+// sigma there would flake on the estimate rather than catch a bias. --thorough
+// tightens it back, which is the run to use before landing
+inline f64 statistical_sigma_gate() {
+	return thoroughEnabled ? 4.0 : 6.0;
+}
 
 // dispatch a compute render node and return immediately
 template <typename Push>
@@ -293,6 +330,14 @@ inline bool write_heatmap_png(
 	return stbi_write_png(
 		path, (int)width, (int)height, 3, pixels.data(), (int)width * 3
 	) != 0;
+}
+
+// every ported shader imports util-types, so a slang dispatch always needs
+// the ponder shader directory on its search path. the glsl side never did:
+// its f32/u32 aliases were a #define block, not an include
+inline srat::slice<char const * const> slang_include_paths() {
+	static char const * const paths[] = { PONDER_SHADER_DIR };
+	return srat::slice<char const * const>(paths, 1u);
 }
 
 } // namespace test

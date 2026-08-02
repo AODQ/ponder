@@ -32,7 +32,7 @@ TEST_CASE("compute: fill_u32 basic") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(kCount);
@@ -59,7 +59,7 @@ TEST_CASE("compute: fill_u32 zero value") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(kCount);
@@ -97,7 +97,7 @@ TEST_CASE("compute: fill_u32 max value") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(kCount);
@@ -121,7 +121,7 @@ TEST_CASE("compute: fill_u32 max value") {
 TEST_CASE("compute: fill_u32 count=1") {
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(64); // allocate at least 4 bytes
@@ -146,7 +146,7 @@ TEST_CASE("compute: fill_u32 one workgroup exactly") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(kCount);
@@ -172,7 +172,7 @@ TEST_CASE("compute: passthrough copy") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "passthrough.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/passthrough.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto src = test::make_buffer_u32(kCount);
@@ -213,7 +213,7 @@ TEST_CASE("compute: passthrough large copy") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "passthrough.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/passthrough.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto src = test::make_buffer_u32(kCount);
@@ -252,7 +252,7 @@ TEST_CASE("compute: sequential dispatches") {
 
 	auto pl  = (
 		vkof::pipeline_compute_create(
-			{ .pathCompute = TEST_SHADER_DIR "fill_u32.comp" }
+			{ .pathCompute = TEST_SHADER_DIR "slang/entry/fill_u32.slang" , .includePaths = test::slang_include_paths() }
 		)
 	);
 	auto buf = test::make_buffer_u32(kCount);

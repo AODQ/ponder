@@ -20,7 +20,7 @@ std::vector<f32> evaluate_ggx_iso(std::vector<f32v2> const & samples) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ggx_distribution_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ggx_distribution_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -65,7 +65,7 @@ std::vector<f32> evaluate_ggx_aniso(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ggx_distribution_aniso_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ggx_distribution_aniso_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -110,7 +110,7 @@ std::vector<f32v2> evaluate_ggx_aniso_crosscheck(std::vector<f32> const & sample
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ggx_distribution_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ggx_distribution_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -163,7 +163,7 @@ std::vector<f32> evaluate_smith_visibility(std::vector<f32v3> const & samples) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "smith_visibility_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/smith_visibility_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -206,7 +206,7 @@ std::vector<f32> evaluate_smith_g1(std::vector<f32v2> const & samples) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "smith_g1_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/smith_g1_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -251,7 +251,7 @@ std::vector<f32> evaluate_smith_visibility_aniso(std::vector<f32> const & sample
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "smith_visibility_aniso_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/smith_visibility_aniso_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -294,7 +294,7 @@ std::vector<f32v2> evaluate_smith_visibility_crosscheck(std::vector<f32v3> const
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "smith_visibility_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/smith_visibility_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -337,7 +337,7 @@ std::vector<f32v2> evaluate_smith_g1_crosscheck(std::vector<f32v2> const & sampl
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "smith_g1_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/smith_g1_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

@@ -21,6 +21,7 @@ add_executable(
 	src/test-accel.cpp
 	src/test-buffer.cpp
 	src/test-compute.cpp
+	src/test-dispatch-indirect.cpp
 	src/test-pipeline.cpp
 	src/test-rendernode.cpp
 	src/test-sampler.cpp
@@ -28,6 +29,7 @@ add_executable(
 	src/test-transient.cpp
 	src/test-noise.cpp
 	src/test-fresnel.cpp
+	src/test-openpbr-port-parity.cpp
 	src/test-microfacet.cpp
 	src/test-shading-frame.cpp
 	src/test-roughness.cpp
@@ -42,6 +44,7 @@ add_executable(
 	src/test-fuzz-sampling.cpp
 	src/test-fuzz-eval.cpp
 	src/test-diffuse-transmission.cpp
+	src/test-diffuse-transmission-placement.cpp
 	src/test-transmission.cpp
 	src/test-transmission-sampling.cpp
 	src/test-mixture-lobe-selection.cpp
@@ -51,6 +54,7 @@ add_executable(
 	src/test-vkof-validation.cpp
 	src/test-furnace-model-render.cpp
 	src/test-environment-sampling.cpp
+	src/test-env-mis.cpp
 	src/test-vdb-sampling.cpp
 	src/test-vdb-phase.cpp
 	src/test-subsurface-albedo.cpp
@@ -61,6 +65,15 @@ add_executable(
 	src/test-thin-walled-subsurface.cpp
 	src/test-stage.cpp
 	src/test-blackbody.cpp
+	src/test-tangent-generation.cpp
+	src/test-gltf-volume-attenuation.cpp
+	src/test-dielectric-scenes.cpp
+	src/test-emitter-tables.cpp
+	src/test-emitter-sampling.cpp
+	src/test-emitter-nee-scenes.cpp
+	src/test-regir.cpp
+	src/test-regir-fill.cpp
+	src/test-slang.cpp
 )
 
 # Bake absolute paths into the binary
@@ -69,7 +82,8 @@ target_compile_definitions(
 	PRIVATE
 	TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders/"
 	APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../app/viewer/shaders"
-	PONDER_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib/ponder/shaders/"
+	PONDER_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib/ponder/shaders-old/"
+	PONDER_SHADER_NEW_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib/ponder/shaders/"
 	PONDER_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib/ponder/assets/"
 	MOR_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../lib/mor/include/"
 	NOISE_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
@@ -78,6 +92,7 @@ target_compile_definitions(
 	SHADING_FRAME_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	ENERGY_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	DIELECTRIC_SPECULAR_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
+	DIELECTRIC_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	EON_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	GLOSSY_LAYER_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
 	METALLIC_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/output/"
@@ -103,6 +118,7 @@ target_include_directories(
 	${CMAKE_CURRENT_SOURCE_DIR}
 	${CMAKE_CURRENT_SOURCE_DIR}/../app
 	${CMAKE_CURRENT_SOURCE_DIR}/../app/shaders
+	${CMAKE_CURRENT_SOURCE_DIR}/../lib
 )
 
 target_include_directories(

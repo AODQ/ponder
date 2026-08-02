@@ -315,7 +315,7 @@ void push_eval_sample(
 
 std::vector<f32> evaluate_transmission(std::vector<f32> const & flat) {
 	return run_flat_shader(
-		TEST_SHADER_DIR "transmission_evaluate.comp", flat, 14u, 6u
+		TEST_SHADER_DIR "slang/entry/transmission_evaluate.slang", flat, 14u, 6u
 	);
 }
 
@@ -688,7 +688,7 @@ TEST_CASE("transmission dispersion: matches cpu cauchy/abbe reference and orders
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "transmission_dispersion_evaluate.comp", flat, 3u, 3u
+		TEST_SHADER_DIR "slang/entry/transmission_dispersion_evaluate.slang", flat, 3u, 3u
 	);
 	for (u32 i = 0; i < out.size() / 3u; ++i) {
 		CAPTURE(i);
@@ -717,7 +717,7 @@ TEST_CASE("transmission dispersion: zero abbe number with positive scale stays f
 	// would poison every downstream ior
 	std::vector<f32> const flat = { 1.5f, 1.0f, 0.0f };
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "transmission_dispersion_evaluate.comp", flat, 3u, 3u
+		TEST_SHADER_DIR "slang/entry/transmission_dispersion_evaluate.slang", flat, 3u, 3u
 	);
 	CHECK(std::isfinite(out[0]));
 	CHECK(std::isfinite(out[1]));
@@ -768,7 +768,7 @@ TEST_CASE("transmission btdf: matches materialx walter assembly (grid)") {
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "transmission_crosscheck.comp", flat, 8u, 8u
+		TEST_SHADER_DIR "slang/entry/transmission_crosscheck.slang", flat, 8u, 8u
 	);
 	u32 tirSkipped = 0u;
 	f64 maxRelF = 0.0;
@@ -814,7 +814,7 @@ TEST_CASE("transmission btdf: matches materialx walter assembly (fuzz)") {
 		);
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "transmission_crosscheck.comp", flat, 8u, 8u
+		TEST_SHADER_DIR "slang/entry/transmission_crosscheck.slang", flat, 8u, 8u
 	);
 	u32 tirSkipped = 0u;
 	for (u32 i = 0; i < out.size() / 8u; ++i) {
@@ -1082,7 +1082,7 @@ TEST_CASE("transmission dispersion: ior spread heatmap (abbe x scale)") {
 		}
 	}
 	auto const out = run_flat_shader(
-		TEST_SHADER_DIR "transmission_dispersion_evaluate.comp", flat, 3u, 3u
+		TEST_SHADER_DIR "slang/entry/transmission_dispersion_evaluate.slang", flat, 3u, 3u
 	);
 	std::vector<f32> r((size_t)kSize * kSize);
 	std::vector<f32> g((size_t)kSize * kSize);

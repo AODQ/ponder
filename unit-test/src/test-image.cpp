@@ -205,7 +205,8 @@ TEST_CASE("image: initial data round-trip") {
 	});
 
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "image_read_r32.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/image_read_r32.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(pl.id != 0);
 
@@ -363,10 +364,12 @@ TEST_CASE("image3d: imageStore/imageLoad round-trip") {
 	});
 
 	vkof::Pipeline const fillPl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "image3d_fill.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/image3d_fill.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	vkof::Pipeline const readPl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "image3d_read.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/image3d_read.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(fillPl.id != 0u);
 	REQUIRE(readPl.id != 0u);
@@ -473,10 +476,12 @@ TEST_CASE("image3d: ddgi atlas probe-tile layout") {
 	});
 
 	vkof::Pipeline const fillPl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ddgi3d_probe_fill.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ddgi3d_probe_fill.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	vkof::Pipeline const readPl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "ddgi3d_probe_read.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/ddgi3d_probe_read.slang",
+		.includePaths = test::slang_include_paths(),
 	});
 	REQUIRE(fillPl.id != 0u);
 	REQUIRE(readPl.id != 0u);

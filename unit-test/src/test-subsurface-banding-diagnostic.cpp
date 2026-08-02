@@ -102,11 +102,12 @@ struct RenderResult {
 };
 
 RenderResult render_subsurface_suzanne(
-	f32 const subsurfaceWeight, f32 const specularWeight = 1.0f
+	f32 const subsurfaceWeight, f32 const specularWeight = 1.0f,
+	u32 const seedSalt = 1u
 ) {
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
-		std::string(REPO_DIR) + "/assets/Models/Suzanne/glTF/Suzanne.gltf"
+		std::string(REPO_DIR) + "/assets/models-categorized/test-core/Suzanne/Suzanne.gltf"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -203,7 +204,7 @@ RenderResult render_subsurface_suzanne(
 		PONDER_SHADER_DIR, MOR_INCLUDE_DIR, APP_SHADER_DIR,
 	};
 	auto const pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "subsurface_furnace_render.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/subsurface_furnace_render.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 3u),
 	});
 	REQUIRE(pl.id != 0u);
@@ -239,7 +240,20 @@ RenderResult render_subsurface_suzanne(
 		.envMap = vkof::buffer_virtual_address(envHandlesBuf),
 		.envRotation = 0.0f,
 		.envNeeEnabled = 1u,
-		.envMapOnlyMode = 0u,
+		.emitterLights = 0u,
+		.emitterLightCount = 0u,
+		.meshNeeEnabled = 0u,
+		.manifoldNeeEnabled = 0u,
+		.envLightIndex = 0u,
+		.emitterNeeDebug = 0u,
+		.regirGuards = 0u,
+		.regirCells = 0u,
+		.regirReservoirs = 0u,
+		.regirCellCount = 0u,
+		.regirFrameIndex = 0u,
+		.regirCellSize = 0.0f,
+		.regirEnabled = 0u,
+		.envMapOnlyDepth = 0u,
 		.fireflyClampLuminance = 0.0f,
 		.envBackgroundIntensity = 1.0f,
 		.vdb = 0u,
@@ -273,6 +287,8 @@ RenderResult render_subsurface_suzanne(
 		.flatIndices = bufs.flatIndices,
 		.flatMeshlets = bufs.flatMeshlets,
 		.modelMatrix = f32m44_identity(),
+		.emitterLightOffset = 0u,
+		.emitterLightCount = 0u,
 	};
 	vkof::buffer_upload({
 		.buffer = modelsBuf,
@@ -326,7 +342,7 @@ RenderResult render_subsurface_suzanne(
 		.propagationDepth = 8u,
 		.kullaContyEnergyHandle = energyTables.kullaContyEnergyHandle,
 		.zeltnerLtcParamHandle = zeltnerTables.zeltnerLtcParamHandle,
-		.seedSalt = 1u,
+		.seedSalt = seedSalt,
 		.pad0 = 0u,
 	};
 
@@ -465,7 +481,7 @@ TEST_CASE("gltf diffuse transmission: volume attenuation maps onto subsurface") 
 	mor::Scene scene = mor::scene_create();
 	std::string const modelPath = (
 		std::string(REPO_DIR)
-		+ "/assets/Models/ScatteringSkull/glTF/ScatteringSkull.gltf"
+		+ "/assets/models-categorized/test-transparency/ScatteringSkull.glb"
 	);
 	REQUIRE(std::filesystem::exists(modelPath));
 	mor::scene_load_gltf(scene, modelPath.c_str());
@@ -495,6 +511,52 @@ TEST_CASE("gltf diffuse transmission: volume attenuation maps onto subsurface") 
 
 	mor::scene_gpu_materials_destroy(mats);
 	mor::scene_destroy(scene);
+}
+
+}
+
+TEST_SUITE("[headless]") {
+
+// is the reported banding stochastic (variance, which dwivedi guiding would
+// reduce) or structural (bias/geometry, which it would not)? render the same
+// scene under several independent seeds: noise decorrelates across seeds,
+// a structural artifact lands in the same pixels every time
+TEST_CASE("subsurface banding: stochastic or structural") {
+	std::vector<RenderResult> renders;
+	for (u32 seed = 1u; seed <= 4u; ++seed) {
+		renders.push_back(render_subsurface_suzanne(1.0f, 1.0f, seed));
+	}
+	REQUIRE(renders.size() == 4u);
+	size_t const n = renders[0].rgb.size();
+
+	// per-pixel mean and cross-seed relative deviation, over lit pixels only
+	f64 meanRelDev = 0.0;
+	f64 maxRelDev = 0.0;
+	u32 counted = 0u;
+	for (size_t i = 0u; i < n; ++i) {
+		f64 mean = 0.0;
+		for (auto const & r : renders) { mean += (f64)r.rgb[i]; }
+		mean /= (f64)renders.size();
+		if (mean < 1e-3) { continue; }
+		f64 var = 0.0;
+		for (auto const & r : renders) {
+			f64 const d = (f64)r.rgb[i] - mean;
+			var += d * d;
+		}
+		var /= (f64)renders.size();
+		f64 const relDev = std::sqrt(var) / mean;
+		meanRelDev += relDev;
+		maxRelDev = std::max(maxRelDev, relDev);
+		++counted;
+	}
+	REQUIRE(counted > 0u);
+	meanRelDev /= (f64)counted;
+
+	MESSAGE("lit samples = ", counted, " of ", n);
+	MESSAGE("mean cross-seed relative deviation = ", meanRelDev);
+	MESSAGE("max  cross-seed relative deviation = ", maxRelDev);
+	// diagnostic only: the number is the finding, not a pass/fail bar
+	CHECK(std::isfinite(meanRelDev));
 }
 
 }

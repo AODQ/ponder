@@ -34,7 +34,7 @@ std::vector<f32> run_lookup(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "zeltner_lookup_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/zeltner_lookup_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -80,7 +80,7 @@ std::vector<f32> run_lookup_crosscheck(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "zeltner_lookup_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/zeltner_lookup_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -141,7 +141,7 @@ std::vector<f32> run_eval(u32 tableHandle, std::vector<f32> const & flat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fuzz_evaluate_f_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fuzz_evaluate_f_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -186,7 +186,7 @@ std::vector<f32> run_pdf(std::vector<f32> const & flat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fuzz_pdf_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fuzz_pdf_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -245,7 +245,7 @@ std::vector<f32> run_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "fuzz_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/fuzz_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);

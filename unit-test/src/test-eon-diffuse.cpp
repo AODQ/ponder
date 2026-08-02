@@ -90,7 +90,7 @@ std::vector<f32v3> evaluate_eon(std::vector<f32> const & samplesFlat) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "eon_diffuse_evaluate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/eon_diffuse_evaluate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -139,7 +139,7 @@ void crosscheck_eon(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "eon_diffuse_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/eon_diffuse_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -188,7 +188,7 @@ std::vector<f32v2> crosscheck_energy(std::vector<f32v2> const & samples) {
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "eon_energy_comp_crosscheck.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/eon_energy_comp_crosscheck.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
@@ -233,7 +233,7 @@ std::vector<f32> integrate_furnace(
 
 	char const * const includePaths[] = { PONDER_SHADER_DIR };
 	auto pl = vkof::pipeline_compute_create({
-		.pathCompute = TEST_SHADER_DIR "eon_furnace_integrate.comp",
+		.pathCompute = TEST_SHADER_DIR "slang/entry/eon_furnace_integrate.slang",
 		.includePaths = srat::slice<char const * const>(includePaths, 1),
 	});
 	REQUIRE(pl.id != 0);
