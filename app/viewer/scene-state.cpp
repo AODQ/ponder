@@ -6,6 +6,10 @@
 #include <cfloat>
 #include <cstdio>
 
+// -----------------------------------------------------------------------------
+// -- file view scene state
+// -----------------------------------------------------------------------------
+
 // glTF has no subsurface extension, so every imported material starts with
 // material_load_default()'s (lib/mor/src/mor.cpp) flat subsurfaceColor/
 // Radius -- not tied to this specific asset's own scale or color at all.
@@ -210,6 +214,10 @@ void stage_render_rebuild_blases(
 	}
 	vkof::acceleration_structure_set_tlas(r.tlas);
 }
+
+// -----------------------------------------------------------------------------
+// -- stage render state
+// -----------------------------------------------------------------------------
 
 void stage_render_rebuild_tlas(StageRenderState & r, stage::Stage const & stage) {
 	std::vector<vkof::TlasInstance> tlasInstances;

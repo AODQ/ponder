@@ -49,6 +49,10 @@
 
 namespace {
 
+// -----------------------------------------------------------------------------
+// -- gpu handle types
+// -----------------------------------------------------------------------------
+
 // mirrors util-environment-map.glsl's EnvironmentMapHandles layout exactly;
 // GpuGlobalExtended.envMap (global_pc.h) is a VA into a buffer holding one
 // of these, uploaded once alongside ponder::EnvironmentTables
@@ -126,6 +130,10 @@ struct ViewerArgs {
 	// starts in stage edit mode with a fresh, empty, unsaved stage
 	bool newStage = false;
 };
+
+// -----------------------------------------------------------------------------
+// -- command line
+// -----------------------------------------------------------------------------
 
 void print_usage() {
 	printf(
