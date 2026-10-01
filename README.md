@@ -5,6 +5,39 @@ below is produced by the unit-test suite (`unit-test/output/`) — scene renders
 are validation artifacts, heatmaps are the visual output of the statistical
 and numerical checks each BSDF lobe went through.
 
+## Overview
+
+Vulkan-based renderer and path tracer with an OpenPBR material model, VDB
+volume support, glTF scene loading, and a statistical unit-test suite.
+
+### Repository layout
+
+| Path | Description |
+| --- | --- |
+| `app/viewer` | Interactive viewer / path tracer application. |
+| `app/observer` | Mesh-shader rasterizer with GPU visibility resolve. |
+| `lib/ponder` | Core rendering library: shaders, assets, VDB, blue noise. |
+| `lib/vkof` | Vulkan helper layer (device, VMA, image writing, ImGui). |
+| `lib/mor` | glTF scene loading and meshlet building. |
+| `lib/srat` | Non-graphics utilities (virtual range allocator, camera). |
+| `lib/stage` | Stage (scene description) save/load and ImGui editing. |
+| `lib/tools` | Developer tools (e.g. `aftermath-decode`). |
+| `unit-test` | doctest suite (`vkof-test`) producing the images below; see `unit-test/README.md`. |
+| `openpbr-gaps.md` | Audit of OpenPBR spec conformance gaps. |
+
+### Building
+
+Requires CMake >= 3.20, Ninja, a C++23 compiler, and a Vulkan SDK/driver.
+Most dependencies are fetched with CMake `FetchContent`; OpenVDB is expected
+to be installed on the system.
+
+```sh
+make release            # RelWithDebInfo build + install to install/release
+make debug              # Debug build (ASan/UBSan) + install to install/debug
+make release-optimize   # Release build + install to install/release-optimize
+make clean              # remove build/ and install/
+```
+
 # TODO
 - vdb:
  - HDDA to skip empty space in vdb blobs
