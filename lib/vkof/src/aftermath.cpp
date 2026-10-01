@@ -19,6 +19,10 @@ static VkDevice sDevice = VK_NULL_HANDLE;
 static VkQueue sGraphicsQueue = VK_NULL_HANDLE;
 static PFN_vkGetQueueCheckpointDataNV sPfnGetCheckpoints = nullptr;
 
+// -----------------------------------------------------------------------------
+// -- on_gpu_crash_dump
+// -----------------------------------------------------------------------------
+
 static void on_gpu_crash_dump(
 	void const * pGpuCrashDump,
 	uint32_t const gpuCrashDumpSize,
@@ -68,6 +72,10 @@ static void on_shader_debug_info(
 	fclose(f);
 }
 
+// -----------------------------------------------------------------------------
+// -- on_description
+// -----------------------------------------------------------------------------
+
 static void on_description(
 	PFN_GFSDK_Aftermath_AddGpuCrashDumpDescription add,
 	void * pUserData
@@ -103,6 +111,10 @@ void vkof_aftermath_enable() {
 		);
 	}
 }
+
+// -----------------------------------------------------------------------------
+// -- vkof_aftermath_disable
+// -----------------------------------------------------------------------------
 
 void vkof_aftermath_disable() {
 	GFSDK_Aftermath_DisableGpuCrashDumps();
@@ -145,6 +157,10 @@ void vkof_aftermath_register_spirv(void const * pData, uint32_t size) {
 	fclose(f);
 	printf("[aftermath] shader binary -> %s\n", path);
 }
+
+// -----------------------------------------------------------------------------
+// -- vkof_aftermath_on_device_lost
+// -----------------------------------------------------------------------------
 
 void vkof_aftermath_on_device_lost() {
 	printf("[aftermath] device lost, waiting for crash dump...\n");

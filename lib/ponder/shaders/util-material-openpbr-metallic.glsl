@@ -24,6 +24,10 @@
 	&F_{82}(\mu) = F_s(\mu) - \frac{\mu (1 - \mu)^6}{F_d} F_c\\
 	\end{align*}
 */
+// -----------------------------------------------------------------------------
+// -- openPbrFresnelMetallicEvaluateF
+// -----------------------------------------------------------------------------
+
 vec3 openPbrFresnelMetallicEvaluateF(
 	const OpenPbrMaterial mat,
 	const ShadingFrame frame,

@@ -9,6 +9,10 @@
 #include <nanovdb/NanoVDB.h>
 #include <nanovdb/tools/CreateNanoGrid.h>
 
+// -----------------------------------------------------------------------------
+// -- vdb_initialize
+// -----------------------------------------------------------------------------
+
 void ponder::vdb_initialize() {
 	openvdb::initialize();
 }
@@ -36,6 +40,10 @@ std::vector<std::string> ponder::vdb_grid_names(char const * const path) {
 	file.close();
 	return names;
 }
+
+// -----------------------------------------------------------------------------
+// -- vdb_load
+// -----------------------------------------------------------------------------
 
 ponder::Vdb ponder::vdb_load(
 	char const * const path, char const * const gridName

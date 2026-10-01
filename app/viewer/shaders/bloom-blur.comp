@@ -21,6 +21,10 @@ layout(set = 0, binding = 2) uniform image2D vkofImages[];
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// -----------------------------------------------------------------------------
+// -- entry point
+// -----------------------------------------------------------------------------
+
 void main() {
 	const GpuGlobalExtended unf = (
 		GpuGlobalExtendedBuffer(pc.global.extended).data

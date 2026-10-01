@@ -28,6 +28,10 @@ namespace {
 	return data;
 }
 
+// -----------------------------------------------------------------------------
+// -- shader_lookup_cb
+// -----------------------------------------------------------------------------
+
 void shader_lookup_cb(
 	GFSDK_Aftermath_ShaderBinaryHash const * const pShaderHash,
 	PFN_GFSDK_Aftermath_SetData const setShaderBinary,
@@ -65,6 +69,10 @@ void shader_debug_info_lookup_cb(
 }
 
 } // namespace
+
+// -----------------------------------------------------------------------------
+// -- entry point
+// -----------------------------------------------------------------------------
 
 int main(int const argc, char const * const * const argv) {
 	if (argc > 2 && std::string(argv[1]) == "--hash") {

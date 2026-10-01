@@ -26,6 +26,10 @@
 
 #define VA(Type) u64
 
+// -----------------------------------------------------------------------------
+// -- GpuGlobalExtended
+// -----------------------------------------------------------------------------
+
 // per-frame values that are too large for the 128-byte root pushconstant
 struct GpuGlobalExtended {
 	f32 envIntensity;
@@ -143,6 +147,10 @@ struct GpuGlobalExtended {
 	// fog's extent (world units); caps nee/free-flight distance
 	f32 fogDistanceMax;
 };
+
+// -----------------------------------------------------------------------------
+// -- GpuGlobalPc
+// -----------------------------------------------------------------------------
 
 // root pushconstant, shared by every node in the frame's render graph;
 // pinned to exactly vkof's 128-byte root pushconstant range so each node's

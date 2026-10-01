@@ -8,6 +8,10 @@
 #define ENV_MODE_BLACK 2
 #define ENV_MODE_HDRMAP 3
 
+// -----------------------------------------------------------------------------
+// -- sampleEnvironment
+// -----------------------------------------------------------------------------
+
 vec3 sampleEnvironment(
 	const vec3 dir,
 	const float envIntensity,

@@ -27,6 +27,10 @@
 #endif
 #endif
 
+// -----------------------------------------------------------------------------
+// -- GpuEnvPrefilterPc
+// -----------------------------------------------------------------------------
+
 struct GpuEnvPrefilterPc {
 	u32 srcRadianceHandle;
 	u32 srcRadianceMipCount;

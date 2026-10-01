@@ -1,6 +1,10 @@
 #ifndef UTIL_MATERIAL_OPENPBR_FUZZ_GLSL
 #define UTIL_MATERIAL_OPENPBR_FUZZ_GLSL
 
+// -----------------------------------------------------------------------------
+// -- utilZeltnerFuzzLookup
+// -----------------------------------------------------------------------------
+
 // returns (a, b, R) from the zeltner sheen LTC parameter table;
 // zeltner, burley & chiang 2022
 // a 32x32 fit over (mu, roughness) of the LTC matrix entries plus the
@@ -44,6 +48,10 @@ vec3 utilZeltnerFuzzLookup(
 		)
 	);
 }
+
+// -----------------------------------------------------------------------------
+// -- utilFuzzFrame
+// -----------------------------------------------------------------------------
 
 // builds the tangent frame required by the zeltner LTC parameterization:
 // z along nor, x along the projection of wi onto the tangent plane
@@ -150,6 +158,10 @@ vec3 openPbrFuzzEvaluateF(
 /*
 	pdf(\omega_o) = D(\omega_o) = \frac{t_z \, a^2}{\pi ||t||^4}
 */
+// -----------------------------------------------------------------------------
+// -- openPbrFuzzPdf
+// -----------------------------------------------------------------------------
+
 float openPbrFuzzPdf(
 	const vec3 nor,
 	const vec3 wi,

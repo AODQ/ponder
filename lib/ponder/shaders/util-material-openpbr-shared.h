@@ -1,6 +1,10 @@
 #ifndef UTIL_MATERIAL_OPENPBR_SHARED_H
 #define UTIL_MATERIAL_OPENPBR_SHARED_H
 
+// -----------------------------------------------------------------------------
+// -- OpenPbrMaterial
+// -----------------------------------------------------------------------------
+
 struct OpenPbrMaterial {
 	float baseWeight;
 	vec3 baseColor;

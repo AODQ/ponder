@@ -21,6 +21,10 @@ layout(set = 0, binding = 4) uniform sampler3D vkofTextures3D[];
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
+// -----------------------------------------------------------------------------
+// -- entry point
+// -----------------------------------------------------------------------------
+
 // cosine-hemisphere convolution; cosine-weighted sampling's pdf (cosTheta/pi)
 // cancels both the brdf's 1/pi and the integral's cosTheta term exactly, so
 // the plain sample mean is already "albedo * mean == diffuse reflected

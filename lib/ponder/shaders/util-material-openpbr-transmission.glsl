@@ -23,6 +23,10 @@
 		\tag{openpbr spec, transmission dispersion}\\
 	\end{align*}
 */
+// -----------------------------------------------------------------------------
+// -- openPbrTransmissionIor
+// -----------------------------------------------------------------------------
+
 // (TODO REVIEW)
 // the ior the base dielectric refracts and fresnels at. openpbr requires the
 // reflection and transmission sides of the same interface to share \eta'_s,
@@ -72,6 +76,10 @@ vec3 openPbrDispersionIorRgb(const OpenPbrMaterial mat) {
 		a + b / (lambdaF * lambdaF)
 	);
 }
+
+// -----------------------------------------------------------------------------
+// -- openPbrTransmissionEvaluateF
+// -----------------------------------------------------------------------------
 
 vec3 openPbrTransmissionEvaluateF(
 	const OpenPbrMaterial mat,
@@ -196,6 +204,10 @@ vec3 openPbrTransmissionEvaluateF(
 	return tint * btdf;
 }
 
+// -----------------------------------------------------------------------------
+// -- openPbrTransmissionPdf
+// -----------------------------------------------------------------------------
+
 // pdf of VNDF-sampled refraction direction (walter et al. 2007)
 float openPbrTransmissionPdf(
 	const OpenPbrMaterial mat,
@@ -266,6 +278,10 @@ float openPbrTransmissionPdf(
 		/ max(denom * denom, 1e-6f)
 	);
 }
+
+// -----------------------------------------------------------------------------
+// -- openPbrTransmissionTirReflectPdf
+// -----------------------------------------------------------------------------
 
 // pdf of the transmission lobe's TIR fallback
 float openPbrTransmissionTirReflectPdf(

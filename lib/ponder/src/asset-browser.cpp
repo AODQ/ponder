@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <cstdio>
 
+// -----------------------------------------------------------------------------
+// -- scan_asset_paths
+// -----------------------------------------------------------------------------
+
 std::vector<ponder::ModelEntry> ponder::scan_asset_paths(
 	std::filesystem::path const & settingsPath,
 	std::initializer_list<char const *> const keys,
@@ -94,6 +98,10 @@ std::vector<ponder::ModelEntry> ponder::scan_asset_paths(
 	}
 	return out;
 }
+
+// -----------------------------------------------------------------------------
+// -- asset_list_draw
+// -----------------------------------------------------------------------------
 
 std::string ponder::asset_list_draw(
 	std::vector<ModelEntry> const & list,

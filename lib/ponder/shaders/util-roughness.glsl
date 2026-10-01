@@ -33,6 +33,10 @@
 	\alpha_t = \alpha \sqrt{\frac{2}{1 + (1 - a)^2}}, \quad
 	\alpha_b = (1 - a) \alpha_t
 */
+// -----------------------------------------------------------------------------
+// -- openPbrRoughnessAlpha
+// -----------------------------------------------------------------------------
+
 // a = 0 gives (\alpha, \alpha); a = 1 gives (\alpha \sqrt{2}, 0), floored
 // so the degenerate axis stays sampleable
 f32v2 openPbrRoughnessAlpha(const f32 roughness, const f32 anisotropy) {

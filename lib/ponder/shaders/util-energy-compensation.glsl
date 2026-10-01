@@ -16,6 +16,10 @@
 #define u64 uint64_t
 #endif
 
+// -----------------------------------------------------------------------------
+// -- utilMicrofacetGgxDirectionalAlbedo
+// -----------------------------------------------------------------------------
+
 // rational quadratic fit to monte carla data for ggx directional albedo;
 // from materialx
 f32 utilMicrofacetGgxDirectionalAlbedo(
@@ -57,6 +61,10 @@ f32 utilMicrofacetGgxDirectionalAlbedo(
 		\tag{kulla \& conty 2017}\\
 	\end{align*}
 */
+// -----------------------------------------------------------------------------
+// -- utilMicrofacetDielectricEnergyCompensate
+// -----------------------------------------------------------------------------
+
 f32 utilMicrofacetDielectricEnergyCompensate(
 	const f32 mu,
 	const f32 roughness,
@@ -82,6 +90,10 @@ f32 utilMicrofacetDielectricEnergyCompensate(
 	E(\mu) = (1 + F_{avg} \frac{1 - E_{ss}(\mu)}{E_{ss}(\mu)})
 		\cdot E_{ss}^F(\mu, \alpha, f_0)
 */
+// -----------------------------------------------------------------------------
+// -- utilMicrofacetDielectricAlbedo
+// -----------------------------------------------------------------------------
+
 f32 utilMicrofacetDielectricAlbedo(
 	const f32 mu,
 	const f32 roughness,

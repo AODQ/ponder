@@ -67,6 +67,10 @@
 		\tag{openpbr spec, figure 96 + eq. 70}\\
 	\end{align*}
 */
+// -----------------------------------------------------------------------------
+// -- openPbrCoatEvaluateF
+// -----------------------------------------------------------------------------
+
 vec3 openPbrCoatEvaluateF(
 	const MaterialTableHandles tables,
 	const OpenPbrMaterial mat,

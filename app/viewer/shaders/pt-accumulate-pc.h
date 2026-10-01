@@ -16,6 +16,10 @@ constexpr u32 kPtTileSize = 128u;
 const u32 kPtTileSize = 128u;
 #endif
 
+// -----------------------------------------------------------------------------
+// -- GpuPtAccumulatePC
+// -----------------------------------------------------------------------------
+
 struct GpuPtAccumulatePC {
 	u32 inputHandle;
 	u32 accumHandle;

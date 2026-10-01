@@ -25,6 +25,10 @@ $$
 	phase shift on TIR is amplitude-dependent, but set to 0 since
 	$T_{12} = 1 - R_{12}$ and $R_{12} = 1$
 */
+// -----------------------------------------------------------------------------
+// -- utilFresnelDielectricPhase
+// -----------------------------------------------------------------------------
+
 void utilFresnelDielectricPhase(
 	const float cosThetaI,
 	const float cosThetaT,
@@ -110,6 +114,10 @@ $$
 	\end{align*}
 $$
 */
+// -----------------------------------------------------------------------------
+// -- utilFresnelConductorPhase
+// -----------------------------------------------------------------------------
+
 void utilFresnelConductorPhase(
 	const float cosThetaI, // n_2, current medium
 	const float cosThetaT, // n_3, next medium
@@ -233,6 +241,10 @@ void utilFresnelConductorPhase(
 	scale below (rather than the paper code's 1.0e-9) is because
 	mat.thinFilmThickness is stored in micrometers
 */
+// -----------------------------------------------------------------------------
+// -- utilEvaluateXyzSensitivity
+// -----------------------------------------------------------------------------
+
 vec3 utilEvaluateXyzSensitivity(const float opd, const float shift) {
 	// gaussian fits
 	const float phase = 2*PI * opd * 1.0e-6;

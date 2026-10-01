@@ -12,6 +12,10 @@ layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
 layout(location = 0) flat out uint outVisibility[];
 
+// -----------------------------------------------------------------------------
+// -- entry point
+// -----------------------------------------------------------------------------
+
 void main() {
 	GpuMorMeshletBuffer meshletBuf = GpuMorMeshletBuffer(pc.draw.meshlets);
 	const GpuMorMeshlet meshlet = meshletBuf.data[gl_WorkGroupID.x];

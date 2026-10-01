@@ -29,6 +29,10 @@
 
 #define VA(Type) u64
 
+// -----------------------------------------------------------------------------
+// -- GpuGlobalExtended
+// -----------------------------------------------------------------------------
+
 // per-frame values that are too large for the 128-byte root pushconstant
 struct GpuGlobalExtended {
 	u32 renderWidth;

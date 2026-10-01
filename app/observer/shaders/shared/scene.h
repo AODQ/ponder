@@ -12,6 +12,10 @@
 #include "shared/global-pc.h"
 #endif
 
+// -----------------------------------------------------------------------------
+// -- GpuSceneDrawPc
+// -----------------------------------------------------------------------------
+
 struct GpuSceneDrawPc {
 	u32 modelId;
 	VA(GpuMorMeshletBuffer) meshlets;

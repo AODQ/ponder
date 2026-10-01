@@ -36,6 +36,10 @@
 	1/(4 (\omega_i \cdot n)(\omega_o \cdot n)) term is already folded into
 	mf_v (see utilMicrofacetSmithGgxVisibilityAniso)
 */
+// -----------------------------------------------------------------------------
+// -- openPbrDielectricSpecularEvaluateF
+// -----------------------------------------------------------------------------
+
 f32v3 openPbrDielectricSpecularEvaluateF(
 	const f32 specularRoughness,
 	const f32 specularRoughnessAnisotropy,

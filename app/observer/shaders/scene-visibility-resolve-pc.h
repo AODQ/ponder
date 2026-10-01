@@ -5,6 +5,10 @@
 
 #include "shared/global-pc.h"
 
+// -----------------------------------------------------------------------------
+// -- GpuResolveModelIndirect
+// -----------------------------------------------------------------------------
+
 struct GpuResolveModelIndirect {
 	VA(GpuMorMeshletBuffer) meshlets;
 	VA(GpuMorMaterialBuffer) materials;
@@ -38,6 +42,10 @@ layout(buffer_reference, scalar) buffer GpuProbeResultBuffer {
 	GpuProbeResult data;
 };
 #endif
+
+// -----------------------------------------------------------------------------
+// -- GpuResolvePc
+// -----------------------------------------------------------------------------
 
 struct GpuResolvePc {
 	u32 visibilityImageHandle;

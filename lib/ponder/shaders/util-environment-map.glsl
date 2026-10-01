@@ -20,6 +20,10 @@
 #define PI  3.14159265358979323846
 #endif
 
+// -----------------------------------------------------------------------------
+// -- EnvironmentMapHandles
+// -----------------------------------------------------------------------------
+
 // HDR environment map precomputed importance-sampling tables.
 // radiance is r32g32b32a32 float WxH
 // pdf is r32 float WxH
@@ -55,6 +59,10 @@ f32v3 environmentMapUvToDir(const f32v2 uv, const f32 rotation) {
 	return f32v3(sinTheta * cos(phi), cosTheta, sinTheta * sin(phi));
 }
 
+// -----------------------------------------------------------------------------
+// -- environmentMapPdf
+// -----------------------------------------------------------------------------
+
 // solid-angle pdf of environment map's importance distribution at 'dir'
 f32 environmentMapPdf(
 	const EnvironmentMapHandles handles, const f32v3 dir, const f32 rotation
@@ -76,6 +84,10 @@ f32 environmentMapPdf(
 	const f32 pdfUv = pdfTexel * f32(pdfSize.x) * f32(pdfSize.y);
 	return pdfUv / (2.0f * PI * PI * sinTheta);
 }
+
+// -----------------------------------------------------------------------------
+// -- environmentMapImportanceSample
+// -----------------------------------------------------------------------------
 
 // generate an importance-sampled direction from the environment map's
 // precomputed distribution via Vose's alias method: one O(1) lookup (two
@@ -139,6 +151,10 @@ f32v3 environmentMapImportanceSample(
 	pdf = environmentMapPdf(handles, dir, rotation);
 	return dir;
 }
+
+// -----------------------------------------------------------------------------
+// -- environmentMapRadiance
+// -----------------------------------------------------------------------------
 
 // filtered (bilinear) radiance lookup; filtered radiance against an
 // exact-texel pdf is a standard, harmless approximation (pbrt does the same)

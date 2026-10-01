@@ -40,6 +40,10 @@
 	E(\mu_i) = F_{82}(\mu_i)
 		\bigl(E_{ss}(\mu_i, \alpha) + F_{avg} (1 - E_{ss}(\mu_i, \alpha))\bigr)
 */
+// -----------------------------------------------------------------------------
+// -- openPbrConductorIblAlbedo
+// -----------------------------------------------------------------------------
+
 vec3 openPbrConductorIblAlbedo(
 	const OpenPbrMaterial mat,
 	const float dotNorWi,
@@ -99,6 +103,10 @@ vec3 openPbrConductorIblAlbedo(
 	);
 	return mfFresnel * (ess + fAvg * (1.0f - ess));
 }
+
+// -----------------------------------------------------------------------------
+// -- OpenPbrCoatIblResult
+// -----------------------------------------------------------------------------
 
 struct OpenPbrCoatIblResult {
 	vec3 ownReflectance;
@@ -207,6 +215,10 @@ OpenPbrCoatIblResult openPbrCoatIblEvaluate(
 	return result;
 }
 
+// -----------------------------------------------------------------------------
+// -- OpenPbrFuzzIblResult
+// -----------------------------------------------------------------------------
+
 struct OpenPbrFuzzIblResult {
 	vec3 ownReflectance;
 	float attenuation;
@@ -238,6 +250,10 @@ OpenPbrFuzzIblResult openPbrFuzzIblEvaluate(
 	result.attenuation = 1.0f - mat.fuzzWeight * eFuzz;
 	return result;
 }
+
+// -----------------------------------------------------------------------------
+// -- openPbrIblEvaluateF
+// -----------------------------------------------------------------------------
 
 // top-level IBL evaluate; mirrors openPbrEvaluateF's composition order
 // exactly (dielectric-specular+diffuse mixed by metalness with the

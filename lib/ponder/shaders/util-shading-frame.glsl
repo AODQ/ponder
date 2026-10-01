@@ -18,6 +18,10 @@
 
 #include "util-random.glsl"
 
+// -----------------------------------------------------------------------------
+// -- utilCalculateXy
+// -----------------------------------------------------------------------------
+
 void utilCalculateXy(
 	const f32v3 nor,
 	out f32v3 binormal,
@@ -49,6 +53,10 @@ mat3 utilCalculateTbnBasis(
 	const vec3 bitangent = (cross(n, t) * tangent.w);
 	return mat3(t, bitangent, n);
 }
+
+// -----------------------------------------------------------------------------
+// -- ShadingFrame
+// -----------------------------------------------------------------------------
 
 // shading frame for the anisotropic lobes; tanY = cross(nor, tanX).
 // bitangent handedness does not matter distribution-wise: the aniso ggx D
@@ -88,6 +96,10 @@ ShadingFrame shadingFrameFromTangent(const f32v3 nor, const f32v3 tangent) {
 	return frame;
 }
 
+// -----------------------------------------------------------------------------
+// -- utilShadingNormalOrGeometric
+// -----------------------------------------------------------------------------
+
 // falls back to the geometric normal on a degenerate (zero/NaN-length)
 // shading normal, e.g. a missing NORMAL attribute or antiparallel corners
 f32v3 utilShadingNormalOrGeometric(
@@ -120,6 +132,10 @@ ShadingFrame shadingFrameRotate(const ShadingFrame frame, const f32 rotation) {
 	rotated.nor = frame.nor;
 	return rotated;
 }
+
+// -----------------------------------------------------------------------------
+// -- utilReorientHemisphere
+// -----------------------------------------------------------------------------
 
 vec3 utilReorientHemisphere(vec3 wo, vec3 nor) {
 	vec3 binormal, bitangent;

@@ -22,6 +22,10 @@
 // is the standard way volume renderers add self-illumination (fire), and
 // Wyman/Sloan/Shirley 2013 for the CIE fit below.
 
+// -----------------------------------------------------------------------------
+// -- utilPlanckRadiance
+// -----------------------------------------------------------------------------
+
 // planck's law: spectral radiance of a blackbody at temperature T (kelvin),
 // evaluated at wavelength lambdaNm (nanometers). SI units throughout
 // (wavelength converted to meters internally) -- returns W.sr^-1.m^-2.m^-1,
@@ -45,6 +49,10 @@ f32 utilPlanckRadiance(const f32 lambdaNm, const f32 temperatureKelvin) {
 	// that wavelength/temperature either way, not a source of bias
 	return numer / (lambda5 * (exp(min(expArg, 80.0f)) - 1.0f));
 }
+
+// -----------------------------------------------------------------------------
+// -- utilCieXyz1931
+// -----------------------------------------------------------------------------
 
 // wyman, sloan & shirley 2013 (JCGT 2(2)), "Simple Analytic Approximations
 // to the CIE XYZ Color Matching Functions" -- closed-form multi-lobe
@@ -92,6 +100,10 @@ f32v3 utilCieXyz1931(const f32 lambdaNm) {
 
 	return f32v3(x, y, z);
 }
+
+// -----------------------------------------------------------------------------
+// -- utilBlackbodyRadiance
+// -----------------------------------------------------------------------------
 
 // blackbody radiance at temperatureKelvin, converted to linear sRGB.
 // numerically integrates planck's law against the CIE fit above over the

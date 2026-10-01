@@ -35,6 +35,10 @@ layout(buffer_reference, scalar) buffer GpuNanProbeCounterBuffer {
 u64 gNanProbeCounterVa = u64(0);
 ivec2 gNanProbeCoord = ivec2(0);
 
+// -----------------------------------------------------------------------------
+// -- nanProbeInit
+// -----------------------------------------------------------------------------
+
 void nanProbeInit(const u64 counterVa, const ivec2 coord) {
 	gNanProbeCounterVa = counterVa;
 	gNanProbeCoord = coord;

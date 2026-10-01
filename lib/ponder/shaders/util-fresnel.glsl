@@ -16,6 +16,10 @@
 #define u64 uint64_t
 #endif
 
+// -----------------------------------------------------------------------------
+// -- utilFresnelDielectric
+// -----------------------------------------------------------------------------
+
 // dielectric fresnel; eta = specularIor for reflection, 1/specularIor for
 // refraction. cosTheta must be >= 0. ported from cull's
 // utilMicrofacetFresnelDielectric.
@@ -40,6 +44,10 @@ f32 utilFresnelDielectric(const f32 cosTheta, const f32 eta) {
 	);
 	return 0.5f * (rParallel*rParallel + rPerpendicular*rPerpendicular);
 }
+
+// -----------------------------------------------------------------------------
+// -- utilFresnelMetallic
+// -----------------------------------------------------------------------------
 
 // f82-tint conductor fresnel (kutz, hasan & edmondson 2021, "novel aspects
 // of the adobe standard material"), openpbr spec "metal" section. dotNorWi

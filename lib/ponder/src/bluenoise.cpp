@@ -7,6 +7,10 @@
 
 namespace ponder {
 
+// -----------------------------------------------------------------------------
+// -- bluenoise_create
+// -----------------------------------------------------------------------------
+
 Bluenoise bluenoise_create(std::filesystem::path const & textureDir)
 {
 	Bluenoise bn = {};
@@ -60,6 +64,10 @@ Bluenoise bluenoise_create(std::filesystem::path const & textureDir)
 	});
 	return bn;
 }
+
+// -----------------------------------------------------------------------------
+// -- bluenoise_destroy
+// -----------------------------------------------------------------------------
 
 void bluenoise_destroy(Bluenoise & bn)
 {

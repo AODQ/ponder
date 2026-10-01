@@ -27,6 +27,10 @@ layout(buffer_reference, scalar) buffer U32Buffer { u32 data[]; };
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// -----------------------------------------------------------------------------
+// -- entry point
+// -----------------------------------------------------------------------------
+
 void main() {
 	const ivec2 coord = (
 		ivec2(gl_GlobalInvocationID.xy)

@@ -8,6 +8,10 @@
 #ifndef UTIL_MESH_RAYTRACE_GLSL
 #define UTIL_MESH_RAYTRACE_GLSL
 
+// -----------------------------------------------------------------------------
+// -- UtilMeshAttributeDataFromIndices
+// -----------------------------------------------------------------------------
+
 struct UtilMeshAttributeDataFromIndices {
 	GpuMorMaterialBuffer materialBuf;
 	uint materialIndex;

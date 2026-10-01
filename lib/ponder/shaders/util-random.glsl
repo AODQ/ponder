@@ -19,6 +19,10 @@
 #define skPi 3.14159265358979323846
 #define skTau 6.28318530717958647692
 
+// -----------------------------------------------------------------------------
+// -- fnPcgHash
+// -----------------------------------------------------------------------------
+
 // one-shot hash, used only to seed the pcg32 streams
 u32 fnPcgHash(u32 s) {
 	s = s * 747796405u + 2891336453u;
@@ -46,6 +50,10 @@ f32 fnSampleUniform(inout u64 state) {
 f32v2 fnSampleUniform2(inout u64 state) {
 	return f32v2(fnSampleUniform(state), fnSampleUniform(state));
 }
+
+// -----------------------------------------------------------------------------
+// -- fnSampleBluenoise
+// -----------------------------------------------------------------------------
 
 f32 fnSampleBluenoise(const u32v2 coord, const u32 textureHandle) {
 	const f32v2 uv = (f32v2(coord % u32v2(128)) + 0.5f) / 128.0f;

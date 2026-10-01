@@ -5,6 +5,10 @@
 #define TAU 6.28318530717958647692
 #endif
 
+// -----------------------------------------------------------------------------
+// -- envPrefilterRadicalInverseVdc
+// -----------------------------------------------------------------------------
+
 float envPrefilterRadicalInverseVdc(uint bits) {
 	bits = (bits << 16u) | (bits >> 16u);
 	bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
@@ -34,6 +38,10 @@ vec3 envPrefilterImportanceSampleH(
 	utilCalculateXy(nor, tangent, bitangent);
 	return normalize(tangent * hLocal.x + bitangent * hLocal.y + nor * hLocal.z);
 }
+
+// -----------------------------------------------------------------------------
+// -- envPrefilterComputeLod
+// -----------------------------------------------------------------------------
 
 // gpu gems 3 20.4 eq 13 (krivanek & colbert 2008): picks a pre-blurred
 // source mip proportional to the sample's own solid angle, so a sample

@@ -17,6 +17,10 @@ layout(buffer_reference, scalar) buffer GpuFlatMeshletBuffer {
 };
 #endif
 
+// -----------------------------------------------------------------------------
+// -- GpuResolveModelIndirect
+// -----------------------------------------------------------------------------
+
 struct GpuResolveModelIndirect {
 	VA(GpuMorMeshletBuffer) meshlets;
 	VA(GpuMorMaterialBuffer) materials;

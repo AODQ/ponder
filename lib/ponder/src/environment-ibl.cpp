@@ -4,6 +4,10 @@
 
 #include <algorithm>
 
+// -----------------------------------------------------------------------------
+// -- environment_ibl_create
+// -----------------------------------------------------------------------------
+
 ponder::EnvironmentIbl ponder::environment_ibl_create() {
 	EnvironmentIbl ibl;
 	ibl.sampler = vkof::sampler_create({
@@ -49,6 +53,10 @@ ponder::EnvironmentIbl ponder::environment_ibl_create() {
 
 	return ibl;
 }
+
+// -----------------------------------------------------------------------------
+// -- environment_ibl_destroy
+// -----------------------------------------------------------------------------
 
 void ponder::environment_ibl_destroy(EnvironmentIbl & ibl) {
 	vkof::pipeline_destroy(ibl.specularPipeline);
